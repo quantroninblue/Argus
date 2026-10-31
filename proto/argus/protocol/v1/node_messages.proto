@@ -1,0 +1,100 @@
+syntax = "proto3";
+
+package argus.protocol.v1;
+
+import "argus/protocol/v1/common.proto";
+
+enum LinkState {
+  LINK_STATE_UNSPECIFIED = 0;
+  LINK_STATE_CONNECTED = 1;
+  LINK_STATE_DEGRADED = 2;
+  LINK_STATE_LOST = 3;
+}
+
+enum SafetyState {
+  SAFETY_STATE_UNSPECIFIED = 0;
+  SAFETY_STATE_NOMINAL = 1;
+  SAFETY_STATE_LIMITED = 2;
+  SAFETY_STATE_STOPPED = 3;
+  SAFETY_STATE_FAILSAFE = 4;
+}
+
+message LinkStats {
+  LinkState state = 1;
+  double round_trip_ms = 2;
+  double loss_fraction = 3;
+}
+
+message Health {
+  double cpu_load = 1;
+  double temperature_c = 2;
+  repeated string faulted_sensors = 3;
+}
+
+message Telemetry {
+  Stamp stamp = 1;
+  Pose pose_odom = 2;
+  Pose pose_map = 3;
+  uint64 map_epoch = 4;
+  MeasuredVelocity velocity = 5;
+  LinkStats link = 6;
+  Health health = 7;
+  SafetyState safety = 8;
+  uint64 plan_generation = 9;
+  string active_waypoint_id = 10;
+}
+
+enum FrameEncoding {
+  FRAME_ENCODING_UNSPECIFIED = 0;
+  FRAME_ENCODING_JPEG = 1;
+  FRAME_ENCODING_H264 = 2;
+  FRAME_ENCODING_DEPTH_PNG16 = 3;
+  FRAME_ENCODING_SCAN_FLOAT32 = 4;
+  FRAME_ENCODING_POINTS_FLOAT32 = 5;
+}
+
+message SensorFrame {
+  Stamp stamp = 1;
+  string sensor_id = 2;
+  FrameEncoding encoding = 3;
+  uint32 width = 4;
+  uint32 height = 5;
+  bytes data = 6;
+}
+
+enum EvidenceEncoding {
+  EVIDENCE_ENCODING_UNSPECIFIED = 0;
+  EVIDENCE_ENCODING_VOXEL_DELTA = 1;
+}
+
+// Changes to the node's local map since the last message.
+message LocalEvidence {
+  Stamp stamp = 1;
+  uint64 map_epoch = 2;
+  Pose map_to_odom = 3;
+  double resolution_m = 4;
+  EvidenceEncoding encoding = 5;
+  bytes payload = 6;
+}
+
+enum EventKind {
+  EVENT_KIND_UNSPECIFIED = 0;
+  EVENT_KIND_STEP_REACHED = 1;
+  EVENT_KIND_STEP_FAILED = 2;
+  EVENT_KIND_SAFETY_STOP = 3;
+  EVENT_KIND_FAILSAFE_ENTERED = 4;
+  EVENT_KIND_FAILSAFE_CLEARED = 5;
+  EVENT_KIND_SENSOR_FAULT = 6;
+  EVENT_KIND_LINK_STATE_CHANGED = 7;
+  EVENT_KIND_PLAN_REJECTED = 8;
+}
+
+message Event {
+  Stamp stamp = 1;
+  EventKind kind = 2;
+  uint64 plan_generation = 3;
+  string waypoint_id = 4;
+  // Set only for EVENT_KIND_STEP_FAILED.
+  FailureCause cause = 5;
+  string detail = 6;
+}

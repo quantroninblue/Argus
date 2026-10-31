@@ -1,0 +1,73 @@
+# A generic omnidirectional base: moves in any direction on the floor.
+argus_profile: 1
+id: example-planar-omnidirectional
+name: Example omnidirectional base
+
+geometry:
+  ground_z_m: 0.0
+  shapes:
+    - type: box
+      size_m: [0.70, 0.70, 0.30]
+      pose: {xyz_m: [0.0, 0.0, 0.20]}
+  frames:
+    top_lidar: {xyz_m: [0.0, 0.0, 0.40]}
+    front_depth: {xyz_m: [0.36, 0.0, 0.30], rpy_rad: [0.0, 0.30, 0.0]}
+    rear_depth: {xyz_m: [-0.36, 0.0, 0.30], rpy_rad: [0.0, 0.30, 3.14159265]}
+    imu: {xyz_m: [0.0, 0.0, 0.20]}
+
+motion:
+  space: planar
+  can_reverse: true
+  can_strafe: true
+  collision_padding_m: 0.05
+  limits:
+    x: {velocity_mps: [-0.8, 0.8], accel_mps2: 0.6, decel_mps2: 1.0}
+    y: {velocity_mps: [-0.8, 0.8], accel_mps2: 0.6, decel_mps2: 1.0}
+    z: {velocity_mps: [0.0, 0.0]}
+    yaw: {rate_radps: 1.0, accel_radps2: 2.0}
+
+control:
+  interface: velocity
+  transport: ros2
+  endpoint: /cmd_vel
+  rate_hz: 50
+  latency_s: 0.06
+  controller_timeout_s: 0.25
+
+failsafe:
+  link_lost_after_s: 3.0
+  on_link_lost: stop
+  uncovered_motion: creep
+  creep_speed_mps: 0.1
+
+sensors:
+  - id: top_lidar
+    kind: range_2d
+    frame: top_lidar
+    source: {transport: ros2, endpoint: /scan}
+    rate_hz: 20
+    range_m: [0.1, 20.0]
+    fov_deg: {h: 360, v: 1.0}
+  - id: front_depth
+    kind: depth
+    frame: front_depth
+    source: {transport: ros2, endpoint: /front/depth}
+    rate_hz: 15
+    range_m: [0.2, 5.0]
+    fov_deg: {h: 90, v: 60}
+  - id: rear_depth
+    kind: depth
+    frame: rear_depth
+    source: {transport: ros2, endpoint: /rear/depth}
+    rate_hz: 15
+    range_m: [0.2, 5.0]
+    fov_deg: {h: 90, v: 60}
+  - id: imu
+    kind: imu
+    frame: imu
+    source: {transport: ros2, endpoint: /imu}
+    rate_hz: 200
+
+compute:
+  board: vicharak_axon
+  accelerator: rk3588_npu

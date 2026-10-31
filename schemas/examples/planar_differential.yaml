@@ -1,0 +1,79 @@
+# A generic differential-drive base: drives forward and back, turns in place.
+argus_profile: 1
+id: example-planar-differential
+name: Example differential-drive base
+
+geometry:
+  ground_z_m: 0.0
+  shapes:
+    - type: box
+      size_m: [0.60, 0.45, 0.25]
+      pose: {xyz_m: [0.0, 0.0, 0.18]}
+    - type: cylinder
+      radius_m: 0.05
+      length_m: 0.40
+      pose: {xyz_m: [-0.15, 0.0, 0.50]}
+  frames:
+    front_lidar: {xyz_m: [0.25, 0.0, 0.33]}
+    front_depth: {xyz_m: [0.28, 0.0, 0.60], rpy_rad: [0.0, 0.35, 0.0]}
+    imu: {xyz_m: [0.0, 0.0, 0.18]}
+    wheel_axle: {xyz_m: [0.0, 0.0, 0.08]}
+
+motion:
+  space: planar
+  can_reverse: true
+  can_strafe: false
+  min_turn_radius_m: 0.0
+  collision_padding_m: 0.05
+  limits:
+    x: {velocity_mps: [-0.3, 1.0], accel_mps2: 0.8, decel_mps2: 1.2}
+    y: {velocity_mps: [0.0, 0.0]}
+    z: {velocity_mps: [0.0, 0.0]}
+    yaw: {rate_radps: 1.5, accel_radps2: 3.0}
+
+control:
+  interface: velocity
+  transport: ros2
+  endpoint: /cmd_vel
+  rate_hz: 50
+  latency_s: 0.08
+  controller_timeout_s: 0.3
+
+failsafe:
+  link_lost_after_s: 3.0
+  on_link_lost: finish_leg_then_stop
+  uncovered_motion: forbid
+
+sensors:
+  - id: front_lidar
+    kind: range_2d
+    frame: front_lidar
+    source: {transport: ros2, endpoint: /scan}
+    rate_hz: 15
+    range_m: [0.1, 12.0]
+    fov_deg: {h: 270, v: 1.0}
+  - id: front_depth
+    kind: depth
+    frame: front_depth
+    source: {transport: ros2, endpoint: /camera/depth/image_raw}
+    rate_hz: 15
+    range_m: [0.3, 6.0]
+    fov_deg: {h: 87, v: 58}
+  - id: imu
+    kind: imu
+    frame: imu
+    source: {transport: ros2, endpoint: /imu}
+    rate_hz: 100
+  - id: wheel_odom
+    kind: wheel_odom
+    frame: wheel_axle
+    source: {transport: ros2, endpoint: /odom}
+    rate_hz: 50
+
+compute:
+  board: vicharak_axon
+  accelerator: rk3588_npu
+
+provenance:
+  motion.limits.x.decel_mps2: declared
+  control.latency_s: declared

@@ -1,0 +1,50 @@
+syntax = "proto3";
+
+package argus.protocol.v1;
+
+// Node wall clock, kept in step with the hub by time sync.
+message Stamp {
+  int64 unix_nanos = 1;
+}
+
+message Vector3 {
+  double x = 1;
+  double y = 2;
+  double z = 3;
+}
+
+message Quaternion {
+  double x = 1;
+  double y = 2;
+  double z = 3;
+  double w = 4;
+}
+
+message Pose {
+  Vector3 position = 1;
+  Quaternion orientation = 2;
+}
+
+// Measured motion, reported by the node. Never sent from hub to node.
+message MeasuredVelocity {
+  Vector3 linear_mps = 1;
+  Vector3 angular_radps = 2;
+}
+
+enum FailureCause {
+  FAILURE_CAUSE_UNSPECIFIED = 0;
+  FAILURE_CAUSE_DEAD_END_OBSERVED = 1;
+  FAILURE_CAUSE_SEARCHED_NO_GOAL = 2;
+  FAILURE_CAUSE_TEMPORARY_OBSTRUCTION = 3;
+  FAILURE_CAUSE_CONTROLLER_NO_PROGRESS = 4;
+  FAILURE_CAUSE_LOCALIZATION_INVALID = 5;
+  FAILURE_CAUSE_SENSOR_INVALID = 6;
+  FAILURE_CAUSE_COMPUTE_DEADLINE_MISS = 7;
+  FAILURE_CAUSE_LINK_LOST = 8;
+}
+
+enum MotionSpace {
+  MOTION_SPACE_UNSPECIFIED = 0;
+  MOTION_SPACE_PLANAR = 1;
+  MOTION_SPACE_AERIAL = 2;
+}

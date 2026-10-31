@@ -1,0 +1,71 @@
+# A generic multirotor: moves in 3D, holds position, commanded with pose setpoints.
+argus_profile: 1
+id: example-aerial-multirotor
+name: Example multirotor
+
+geometry:
+  shapes:
+    - type: box
+      size_m: [0.25, 0.25, 0.10]
+    - {type: sphere, radius_m: 0.12, pose: {xyz_m: [0.18, 0.18, 0.03]}}
+    - {type: sphere, radius_m: 0.12, pose: {xyz_m: [0.18, -0.18, 0.03]}}
+    - {type: sphere, radius_m: 0.12, pose: {xyz_m: [-0.18, 0.18, 0.03]}}
+    - {type: sphere, radius_m: 0.12, pose: {xyz_m: [-0.18, -0.18, 0.03]}}
+  frames:
+    top_range: {xyz_m: [0.0, 0.0, 0.20]}
+    down_depth: {xyz_m: [0.0, 0.0, -0.06], rpy_rad: [0.0, 1.5708, 0.0]}
+    imu: {xyz_m: [0.0, 0.0, 0.0]}
+
+motion:
+  space: aerial
+  can_reverse: true
+  can_strafe: true
+  collision_padding_m: 0.10
+  limits:
+    x: {velocity_mps: [-2.0, 2.0], accel_mps2: 2.0, decel_mps2: 3.0}
+    y: {velocity_mps: [-2.0, 2.0], accel_mps2: 2.0, decel_mps2: 3.0}
+    z: {velocity_mps: [-1.0, 1.0], accel_mps2: 1.5, decel_mps2: 2.0}
+    yaw: {rate_radps: 1.0, accel_radps2: 2.0}
+
+control:
+  interface: pose_setpoint
+  transport: mavlink
+  endpoint: udp://:14540
+  rate_hz: 20
+  latency_s: 0.05
+  controller_timeout_s: 0.5
+
+failsafe:
+  link_lost_after_s: 2.0
+  on_link_lost: hold
+  uncovered_motion: forbid
+
+sensors:
+  - id: top_range
+    kind: range_3d
+    frame: top_range
+    source: {transport: ros2, endpoint: /points}
+    rate_hz: 10
+    range_m: [0.2, 30.0]
+    fov_deg: {h: 360, v: 60}
+  - id: down_depth
+    kind: depth
+    frame: down_depth
+    source: {transport: ros2, endpoint: /down/depth}
+    rate_hz: 15
+    range_m: [0.2, 8.0]
+    fov_deg: {h: 87, v: 58}
+  - id: imu
+    kind: imu
+    frame: imu
+    source: {transport: mavlink, endpoint: udp://:14540}
+    rate_hz: 100
+  - id: flight_estimate
+    kind: odometry
+    frame: imu
+    source: {transport: mavlink, endpoint: udp://:14540}
+    rate_hz: 50
+
+compute:
+  board: vicharak_axon
+  accelerator: rk3588_npu

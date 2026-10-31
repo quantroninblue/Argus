@@ -1,0 +1,44 @@
+syntax = "proto3";
+
+package argus.protocol.v1;
+
+import "argus/protocol/v1/hub_messages.proto";
+import "argus/protocol/v1/node_messages.proto";
+import "argus/protocol/v1/session.proto";
+
+message NodeMessage {
+  uint64 seq = 1;
+  oneof body {
+    Hello hello = 2;
+    Heartbeat heartbeat = 3;
+    Telemetry telemetry = 4;
+    LocalEvidence local_evidence = 5;
+    Event event = 6;
+  }
+}
+
+message HubMessage {
+  uint64 seq = 1;
+  oneof body {
+    SessionAccept session_accept = 2;
+    SessionReject session_reject = 3;
+    Heartbeat heartbeat = 4;
+    MissionPlan mission_plan = 5;
+    PlanCancel plan_cancel = 6;
+    MapCorrection map_correction = 7;
+    MapDelta map_delta = 8;
+    StreamRequest stream_request = 9;
+    ModeRequest mode_request = 10;
+  }
+}
+
+message SensorAck {
+  uint64 frames_received = 1;
+}
+
+// The node always opens these streams; the hub never connects to a robot.
+service HubLink {
+  rpc Session(stream NodeMessage) returns (stream HubMessage);
+  // Bulk sensor data on its own stream so it cannot delay plans or heartbeats.
+  rpc Sensors(stream SensorFrame) returns (SensorAck);
+}

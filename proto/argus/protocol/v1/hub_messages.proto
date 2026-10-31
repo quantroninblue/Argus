@@ -1,0 +1,82 @@
+syntax = "proto3";
+
+package argus.protocol.v1;
+
+import "argus/protocol/v1/common.proto";
+import "argus/protocol/v1/session.proto";
+
+// The hub tells the node where to go. It never sends velocities, setpoints or torques;
+// the node turns waypoints into motion and keeps the final say on safety.
+
+message Waypoint {
+  string id = 1;
+  // In the site map frame of the plan's map_epoch.
+  Pose pose = 2;
+  double position_tolerance_m = 3;
+  double yaw_tolerance_rad = 4;
+  bool yaw_free = 5;
+  // Upper bound only. The node may always go slower.
+  double speed_cap_mps = 6;
+  Stamp deadline = 7;
+  // The segment leading here crosses unobserved space.
+  bool speculative = 8;
+}
+
+enum PlanEndAction {
+  PLAN_END_ACTION_UNSPECIFIED = 0;
+  PLAN_END_ACTION_STOP = 1;
+  PLAN_END_ACTION_HOLD = 2;
+  PLAN_END_ACTION_RETURN_HOME = 3;
+}
+
+message MissionPlan {
+  // Strictly increasing per session. The node ignores anything older than what it holds.
+  uint64 generation = 1;
+  Stamp issued = 2;
+  // The node never acts on a plan after this time.
+  Stamp expires = 3;
+  uint64 map_epoch = 4;
+  repeated Waypoint waypoints = 5;
+  PlanEndAction on_complete = 6;
+}
+
+message PlanCancel {
+  uint64 generation = 1;
+  PlanEndAction then = 2;
+}
+
+message MapCorrection {
+  Stamp stamp = 1;
+  uint64 map_epoch = 2;
+  Pose map_to_odom = 3;
+}
+
+enum MapEncoding {
+  MAP_ENCODING_UNSPECIFIED = 0;
+  MAP_ENCODING_VOXEL_TILES = 1;
+}
+
+message MapDelta {
+  uint64 map_epoch = 1;
+  Vector3 bounds_min = 2;
+  Vector3 bounds_max = 3;
+  MapEncoding encoding = 4;
+  bytes payload = 5;
+}
+
+message StreamRequest {
+  repeated StreamRate streams = 1;
+}
+
+enum Mode {
+  MODE_UNSPECIFIED = 0;
+  MODE_PAUSE = 1;
+  MODE_RESUME = 2;
+  MODE_DOCK = 3;
+  MODE_RETURN_HOME = 4;
+}
+
+message ModeRequest {
+  Mode mode = 1;
+  uint64 generation = 2;
+}

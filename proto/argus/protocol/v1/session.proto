@@ -1,0 +1,72 @@
+syntax = "proto3";
+
+package argus.protocol.v1;
+
+import "argus/protocol/v1/common.proto";
+
+message CapabilitySummary {
+  MotionSpace space = 1;
+  string control_interface = 2;
+  double max_speed_mps = 3;
+  bool safety_ready = 4;
+  repeated string sensor_ids = 5;
+}
+
+// First message on every session.
+message Hello {
+  string node_id = 1;
+  string software_version = 2;
+  uint32 protocol_version = 3;
+  string profile_id = 4;
+  string profile_hash = 5;
+  string calibration_version = 6;
+  CapabilitySummary capabilities = 7;
+  // Highest plan generation the node holds, 0 if none. Lets the hub resume after a reconnect.
+  uint64 last_plan_generation = 8;
+}
+
+enum StreamQuality {
+  STREAM_QUALITY_UNSPECIFIED = 0;
+  STREAM_QUALITY_LOW = 1;
+  STREAM_QUALITY_MEDIUM = 2;
+  STREAM_QUALITY_HIGH = 3;
+}
+
+message StreamRate {
+  string sensor_id = 1;
+  double rate_hz = 2;
+  StreamQuality quality = 3;
+}
+
+message SessionAccept {
+  string session_id = 1;
+  string site_id = 2;
+  uint64 map_epoch = 3;
+  int64 clock_offset_nanos = 4;
+  repeated StreamRate streams = 5;
+  // True when the hub keeps the plan the node already holds.
+  bool resume_plan = 6;
+}
+
+enum RejectReason {
+  REJECT_REASON_UNSPECIFIED = 0;
+  REJECT_REASON_UNKNOWN_NODE = 1;
+  REJECT_REASON_PROFILE_MISMATCH = 2;
+  REJECT_REASON_PROFILE_NOT_SAFETY_READY = 3;
+  REJECT_REASON_PROTOCOL_VERSION = 4;
+  REJECT_REASON_HUB_UNAVAILABLE = 5;
+}
+
+message SessionReject {
+  RejectReason reason = 1;
+  string detail = 2;
+}
+
+// Sent both ways. Each side echoes the last heartbeat it received so both can measure
+// round trip time and loss.
+message Heartbeat {
+  uint64 seq = 1;
+  Stamp sent = 2;
+  uint64 echo_seq = 3;
+  Stamp echo_sent = 4;
+}

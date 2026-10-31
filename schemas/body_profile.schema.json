@@ -1,0 +1,199 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/quantroninblue/Argus/schemas/body_profile.schema.json",
+  "title": "Argus body profile",
+  "description": "Describes a robot body to Argus. Structural rules live here; rules that relate fields to each other are enforced by the capability library.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["argus_profile", "id", "geometry", "motion", "control", "failsafe", "sensors", "compute"],
+  "properties": {
+    "argus_profile": {"const": 1},
+    "id": {"$ref": "#/$defs/identifier"},
+    "name": {"type": "string", "minLength": 1},
+    "description_file": {"type": "string", "minLength": 1},
+    "geometry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["shapes"],
+      "properties": {
+        "ground_z_m": {"type": "number"},
+        "shapes": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/shape"}},
+        "frames": {
+          "type": "object",
+          "propertyNames": {"$ref": "#/$defs/identifier"},
+          "additionalProperties": {"$ref": "#/$defs/pose"}
+        }
+      }
+    },
+    "motion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["space", "can_reverse", "can_strafe", "collision_padding_m", "limits"],
+      "properties": {
+        "space": {"enum": ["planar", "aerial"]},
+        "can_reverse": {"type": "boolean"},
+        "can_strafe": {"type": "boolean"},
+        "min_turn_radius_m": {"type": "number", "minimum": 0},
+        "collision_padding_m": {"type": "number", "minimum": 0},
+        "limits": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["x", "y", "z", "yaw"],
+          "properties": {
+            "x": {"$ref": "#/$defs/axis"},
+            "y": {"$ref": "#/$defs/axis"},
+            "z": {"$ref": "#/$defs/axis"},
+            "yaw": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["rate_radps", "accel_radps2"],
+              "properties": {
+                "rate_radps": {"type": "number", "exclusiveMinimum": 0},
+                "accel_radps2": {"type": "number", "exclusiveMinimum": 0}
+              }
+            }
+          }
+        }
+      }
+    },
+    "control": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["interface", "transport", "endpoint", "rate_hz", "latency_s", "controller_timeout_s"],
+      "properties": {
+        "interface": {"enum": ["velocity", "pose_setpoint", "waypoint"]},
+        "transport": {"$ref": "#/$defs/transport"},
+        "endpoint": {"type": "string", "minLength": 1},
+        "rate_hz": {"type": "number", "exclusiveMinimum": 0},
+        "latency_s": {"type": "number", "minimum": 0},
+        "controller_timeout_s": {"type": "number", "exclusiveMinimum": 0}
+      }
+    },
+    "failsafe": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["link_lost_after_s", "on_link_lost", "uncovered_motion"],
+      "properties": {
+        "link_lost_after_s": {"type": "number", "exclusiveMinimum": 0},
+        "on_link_lost": {"enum": ["stop", "hold", "finish_leg_then_stop", "return_home", "land"]},
+        "uncovered_motion": {"enum": ["forbid", "creep"]},
+        "creep_speed_mps": {"type": "number", "exclusiveMinimum": 0}
+      },
+      "if": {"properties": {"uncovered_motion": {"const": "creep"}}},
+      "then": {"required": ["creep_speed_mps"]}
+    },
+    "sensors": {"type": "array", "items": {"$ref": "#/$defs/sensor"}},
+    "compute": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["board", "accelerator"],
+      "properties": {
+        "board": {"type": "string", "minLength": 1},
+        "accelerator": {"enum": ["none", "rk3588_npu", "hailo", "cuda"]}
+      }
+    },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": {"enum": ["declared", "cad", "calibrated", "llm_draft", "llm_draft_reviewed"]}
+    }
+  },
+  "$defs": {
+    "identifier": {"type": "string", "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$"},
+    "vector3": {"type": "array", "minItems": 3, "maxItems": 3, "items": {"type": "number"}},
+    "interval": {"type": "array", "minItems": 2, "maxItems": 2, "items": {"type": "number"}},
+    "transport": {"enum": ["ros2", "mavlink", "serial", "custom"]},
+    "pose": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "xyz_m": {"$ref": "#/$defs/vector3"},
+        "rpy_rad": {"$ref": "#/$defs/vector3"}
+      }
+    },
+    "shape": {
+      "type": "object",
+      "required": ["type"],
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "required": ["size_m"],
+          "properties": {
+            "type": {"const": "box"},
+            "pose": {"$ref": "#/$defs/pose"},
+            "size_m": {"type": "array", "minItems": 3, "maxItems": 3, "items": {"type": "number", "exclusiveMinimum": 0}}
+          }
+        },
+        {
+          "additionalProperties": false,
+          "required": ["radius_m", "length_m"],
+          "properties": {
+            "type": {"const": "cylinder"},
+            "pose": {"$ref": "#/$defs/pose"},
+            "radius_m": {"type": "number", "exclusiveMinimum": 0},
+            "length_m": {"type": "number", "exclusiveMinimum": 0}
+          }
+        },
+        {
+          "additionalProperties": false,
+          "required": ["radius_m"],
+          "properties": {
+            "type": {"const": "sphere"},
+            "pose": {"$ref": "#/$defs/pose"},
+            "radius_m": {"type": "number", "exclusiveMinimum": 0}
+          }
+        }
+      ]
+    },
+    "axis": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["velocity_mps"],
+      "properties": {
+        "velocity_mps": {"$ref": "#/$defs/interval"},
+        "accel_mps2": {"type": "number", "exclusiveMinimum": 0},
+        "decel_mps2": {"type": "number", "exclusiveMinimum": 0}
+      }
+    },
+    "sensor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind", "frame", "source", "rate_hz"],
+      "properties": {
+        "id": {"$ref": "#/$defs/identifier"},
+        "kind": {"enum": ["range_2d", "range_3d", "depth", "rgb", "imu", "wheel_odom", "odometry", "contact"]},
+        "frame": {"$ref": "#/$defs/identifier"},
+        "source": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["transport", "endpoint"],
+          "properties": {
+            "transport": {"$ref": "#/$defs/transport"},
+            "endpoint": {"type": "string", "minLength": 1}
+          }
+        },
+        "rate_hz": {"type": "number", "exclusiveMinimum": 0},
+        "max_age_s": {"type": "number", "exclusiveMinimum": 0},
+        "range_m": {"$ref": "#/$defs/interval"},
+        "fov_deg": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["h", "v"],
+          "properties": {
+            "h": {"type": "number", "exclusiveMinimum": 0, "maximum": 360},
+            "v": {"type": "number", "minimum": 0, "maximum": 180}
+          }
+        }
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"kind": {"enum": ["range_2d", "range_3d", "depth"]}}},
+          "then": {"required": ["range_m", "fov_deg"]}
+        },
+        {
+          "if": {"properties": {"kind": {"const": "rgb"}}},
+          "then": {"required": ["fov_deg"]}
+        }
+      ]
+    }
+  }
+}
