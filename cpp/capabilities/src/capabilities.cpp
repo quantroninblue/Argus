@@ -95,7 +95,9 @@ struct RangeSensor {
     if (!full_circle && std::abs(std::atan2(q.y(), q.x())) > half_h + 1e-9) {
       return false;
     }
-    if (std::abs(std::atan2(q.z(), q.head<2>().norm())) > half_v + 1e-9) {
+    // A scan plane is a degree or so thick; near the sensor that is thinner than the 2 cm the
+    // heights are sampled at, so it would miss every sample. Give it at least half a step.
+    if (std::abs(std::atan2(q.z(), q.head<2>().norm())) > half_v + 1e-9 && std::abs(q.z()) > 0.01) {
       return false;
     }
     const Vec3 ray = point - origin;
@@ -173,9 +175,10 @@ SensingCapability derive_planar_sensing(const Profile& profile,
   sensing.bands = height_bands(profile, collision, options);
   const double ground = profile.geometry.ground_z_m.value_or(0.0);
   const double low = options.min_obstacle_height_m;
-  // Top of the column a declared obstacle height covers, capped at the body's own top.
-  const double assumed_top =
-      ground + std::min(profile.assumed_min_obstacle_height_m.value_or(0.0), collision.aabb_max.z() - ground);
+  // Top of the column a declared obstacle height covers, capped at the top of the bands (the
+  // body's own top, or one band height for a body lower than that).
+  const double band_top = sensing.bands.empty() ? collision.aabb_max.z() - ground : sensing.bands.back().high_m;
+  const double assumed_top = ground + std::min(profile.assumed_min_obstacle_height_m.value_or(0.0), band_top);
   const int samples = static_cast<int>(std::floor(options.evaluation_range_m / options.sample_step_m));
 
   for (double az = 0.0; az < 360.0 - 1e-9; az += options.azimuth_step_deg) {
@@ -249,7 +252,7 @@ SensingCapability derive_planar_sensing(const Profile& profile,
     }
     if (every_band) {
       bin.full_height_from_m = full_from;
-      bin.full_height_reach_m = reach;
+      bin.full_height_reach_m = full_from <= options.max_near_gap_m + 1e-9 ? reach : 0.0;
     }
     bin.sensors.assign(contributing.begin(), contributing.end());
     sensing.bins.push_back(bin);
@@ -286,7 +289,7 @@ SensingCapability derive_aerial_sensing(const CollisionCapability& collision,
         }
       }
       bin.full_height_from_m = bin.first_seen_m;
-      if (bin.seen()) {
+      if (bin.seen() && bin.first_seen_m <= options.max_near_gap_m + 1e-9) {
         bin.full_height_reach_m = bin.max_seen_m;
       }
       bin.sensors.assign(contributing.begin(), contributing.end());
@@ -407,6 +410,7 @@ Capabilities derive_capabilities(const Profile& profile, const DeriveOptions& op
   Capabilities caps;
   caps.min_obstacle_height_m = options.min_obstacle_height_m;
   caps.assumed_obstacle_height_m = profile.assumed_min_obstacle_height_m.value_or(0.0);
+  caps.assumed_clear_at_start_m = profile.assumed_clear_at_start_m.value_or(0.0);
   caps.profile_id = profile.id;
   caps.control = profile.control;
   caps.failsafe = profile.failsafe;

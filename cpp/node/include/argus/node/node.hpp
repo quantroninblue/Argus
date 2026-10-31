@@ -14,6 +14,7 @@
 #include "argus/node/planner.hpp"
 #include "argus/node/ray_pattern.hpp"
 #include "argus/node/safety.hpp"
+#include "argus/node/view.hpp"
 
 namespace argus::node {
 
@@ -107,9 +108,11 @@ class Node {
     Eigen::Isometry3d mount = Eigen::Isometry3d::Identity();
     RayPattern pattern;
     std::vector<double> self_hits;
+    ViewLayout view;
   };
 
   bool pose_at(double stamp, Pose4& pose) const;
+  void view_band(const Vec3& at, double& lo, double& hi) const;
   const RangeSensor& range_sensor(const std::string& id) const;
   void watch_progress(const Waypoint* target, uint32_t flags, double now, std::vector<Event>& events);
   void watch_dead_end(const Waypoint* target, double now, std::vector<Event>& events);
@@ -122,6 +125,8 @@ class Node {
   double control_period_ = 0.02;
   double ground_z_ = 0.0;
   LocalMap map_;
+  // Cells closer than this to the body are checked against each frame's view.
+  double view_radius_m_ = 0.0;
   std::map<std::string, RangeSensor> sensors_;
   SensorClock clock_;
   std::deque<Odometry> history_;

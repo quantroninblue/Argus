@@ -102,6 +102,7 @@ struct Profile {
   // seeing any height up to it means seeing the whole column below. Lets a robot whose only
   // sensor is one scan plane drive normally; unset, nothing is assumed.
   std::optional<double> assumed_min_obstacle_height_m;
+  std::optional<double> assumed_clear_at_start_m;
   std::map<std::string, Provenance> provenance;
 
   const SensorSpec* sensor(const std::string& id) const;

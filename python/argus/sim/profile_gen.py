@@ -240,6 +240,9 @@ def generate_profile(rng: random.Random, index: int) -> dict[str, Any]:
             ["declared", "cad", "calibrated", "llm_draft_reviewed", "llm_draft"])
     if provenance:
         doc["provenance"] = provenance
+    # Scenarios start every body in a clear spot. Fixed, so it draws nothing from rng and every
+    # other field stays as it was for a given seed.
+    doc["assumptions"] = {"clear_at_start_m": 0.5}
     return doc
 
 

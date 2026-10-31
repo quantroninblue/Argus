@@ -24,6 +24,7 @@ LocalMap::LocalMap(const LocalMapConfig& config) : config_(config) {
   const size_t n = static_cast<size_t>(dims_.prod());
   log_odds_.assign(n, 0);
   observed_.assign(n, 0);
+  viewed_.assign(n, 0);
   if (config_.record_evidence) {
     pending_.assign(n, 0);
     pending_set_.assign(n, 0);
@@ -51,6 +52,14 @@ Cell LocalMap::cell(const Index3& i) const {
   }
   const size_t s = slot(i);
   return grid::cell_state(observed_[s] != 0, log_odds_[s]);
+}
+
+bool LocalMap::viewed(const Index3& i) const { return contains(i) && viewed_[slot(i)] != 0; }
+
+void LocalMap::mark_viewed(const Index3& i) {
+  if (contains(i)) {
+    viewed_[slot(i)] = 1;
+  }
 }
 
 Index3 LocalMap::index_of_slot(size_t s) const {
@@ -92,6 +101,7 @@ void LocalMap::clear_slab(int axis, int r) {
       const size_t s = (static_cast<size_t>(i.x()) * dims_.y() + i.y()) * dims_.z() + i.z();
       log_odds_[s] = 0;
       observed_[s] = 0;
+      viewed_[s] = 0;
     }
   }
 }
@@ -116,6 +126,7 @@ void LocalMap::recenter(const Vec3& base) {
     if (std::abs(next[axis] - lo) >= dims_[axis]) {
       std::fill(log_odds_.begin(), log_odds_.end(), 0);
       std::fill(observed_.begin(), observed_.end(), 0);
+      std::fill(viewed_.begin(), viewed_.end(), 0);
       break;
     }
     for (int j = lo; j < hi; ++j) {

@@ -93,11 +93,12 @@
       }
     },
     "assumptions": {
-      "description": "Declared facts about where the robot works. min_obstacle_height_m: obstacles stand on the ground and are at least this tall, so seeing any height up to it counts as seeing the column below it.",
+      "description": "Declared facts about where the robot works. min_obstacle_height_m: obstacles stand on the ground and are at least this tall, so seeing any height up to it counts as seeing the column below it. clear_at_start_m: the space within this distance of the body where Argo starts is clear, so cells there that no sensor can see yet do not stop the first moves; whoever places the robot is responsible for it.",
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "min_obstacle_height_m": {"type": "number", "minimum": 0}
+        "min_obstacle_height_m": {"type": "number", "minimum": 0},
+        "clear_at_start_m": {"type": "number", "minimum": 0}
       }
     },
     "provenance": {

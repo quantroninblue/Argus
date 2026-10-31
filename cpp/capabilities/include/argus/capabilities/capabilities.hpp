@@ -81,7 +81,10 @@ struct CoverageBin {
   double full_height_from_m = kNever;
   // Farthest distance at which every height band is still seen (for aerial bodies, the
   // farthest distance seen). An obstacle in this direction is noticed by this distance at the
-  // latest, so motion this way must be able to stop within it. 0 when some band is never seen.
+  // latest, so motion this way must be able to stop within it. 0 when some band is never seen,
+  // or when the sensors only start seeing every band farther than `max_near_gap_m` from the
+  // edge (the body's own parts blocking the view, say): space that close is never seen from
+  // where the body is, so this is not a direction it can move in.
   double full_height_reach_m = 0.0;
   // Planar only: bands no sensor sees anywhere along this bearing.
   std::vector<HeightBand> unseen_bands;
@@ -129,6 +132,8 @@ struct Capabilities {
   double min_obstacle_height_m = 0.05;
   // The profile's declared minimum obstacle height (profile.hpp), 0 when none.
   double assumed_obstacle_height_m = 0.0;
+  // Declared: space this far from the body where Argo starts is clear.
+  double assumed_clear_at_start_m = 0.0;
   // False while any field is still an unreviewed LLM draft.
   bool safety_ready = true;
   std::vector<std::string> unreviewed_fields;
@@ -141,6 +146,10 @@ struct DeriveOptions {
   double sample_step_m = 0.05;
   double band_height_m = 0.1;
   double min_obstacle_height_m = 0.05;
+  // Largest blind gap next to the body's edge a covered direction may have. Gaps up to this
+  // (a depth camera not seeing the ground at the bumper, a minimum range) were seen a moment
+  // earlier from farther back, and Argo keeps its views that far out to check them.
+  double max_near_gap_m = 1.5;
 };
 
 Capabilities derive_capabilities(const Profile& profile, const DeriveOptions& options = {});

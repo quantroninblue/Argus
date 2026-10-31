@@ -38,6 +38,10 @@ class LocalMap {
   void integrate(const Vec3& origin, const std::vector<Vec3>& ends, const std::vector<bool>& hits);
 
   Cell cell(const Index3& index) const;
+  // Whether some sensor looked at this cell (see view.hpp), whatever its state. Only kept
+  // here; it is not evidence and never reaches the hub.
+  bool viewed(const Index3& index) const;
+  void mark_viewed(const Index3& index);
   Cell at(const Vec3& point) const { return cell(index_of(point)); }
   bool contains(const Index3& index) const;
 
@@ -66,6 +70,7 @@ class LocalMap {
   bool placed_ = false;
   std::vector<int8_t> log_odds_;
   std::vector<uint8_t> observed_;
+  std::vector<uint8_t> viewed_;
   grid::FrameTracer tracer_;
   std::vector<int16_t> pending_;
   // Per slot: 0 not touched since the last flush, else whether it was observed before.

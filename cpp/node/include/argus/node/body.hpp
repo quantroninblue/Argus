@@ -5,6 +5,7 @@
 #include "argus/capabilities/capabilities.hpp"
 #include "argus/node/local_map.hpp"
 #include "argus/node/types.hpp"
+#include "argus/node/view.hpp"
 
 namespace argus::node {
 
@@ -23,7 +24,25 @@ class BodyVolume {
   // `here` is where the robot stands now. Unknown cells inside its padded volume there count
   // as free, and occupied ones only count if the body itself (unpadded) would reach them at
   // `pose`, so a robot already inside its padding near a wall can still move away.
+  //
+  // Unknown cells a sensor has looked at (between its rays, see view.hpp) count as free. Of
+  // the cells no sensor has looked at, those only above or below every sensor's vertical view
+  // on a bearing some sensor covers are accepted too, as PX4's collision prevention and
+  // avoidance do (they work in the horizontal plane); the unknown share counts the rest:
+  // cells beside or ahead of the body that no sensor covers, or closer than a sensor's
+  // minimum range. A planar body is judged per column.
   Contact contact(const LocalMap& map, const Pose4& pose, const Pose4* here) const;
+
+  // Range sensors, for telling space above or below their view from space beside the body.
+  struct Sensor {
+    Eigen::Isometry3d mount = Eigen::Isometry3d::Identity();
+    ViewLayout layout;
+    double max_range_m = 0.0;
+  };
+  void set_sensors(std::vector<Sensor> sensors, double cell_m) {
+    sensors_ = std::move(sensors);
+    map_cell_ = cell_m;
+  }
 
   bool planar() const { return planar_; }
   // Height band, relative to the base origin, in which a planar body can hit something.
@@ -38,6 +57,10 @@ class BodyVolume {
 
  private:
   Cell column(const LocalMap& map, int ix, int iy, int z0, int z1) const;
+  bool column_viewed(const LocalMap& map, int ix, int iy, int z0, int z1) const;
+  // Some sensor covers the point's bearing, and none has it inside its field of view.
+  bool out_of_vertical_view(const Pose4& pose, const Vec3& point, bool& covered, bool& in_view) const;
+  bool column_out_of_vertical_view(const LocalMap& map, const Pose4& pose, int ix, int iy, int z0, int z1) const;
   Contact planar_contact(const LocalMap& map, const Pose4& pose, const Pose4* here) const;
   Contact aerial_contact(const LocalMap& map, const Pose4& pose, const Pose4* here) const;
 
@@ -50,6 +73,8 @@ class BodyVolume {
   double body_radius_ = 0.0;
   double inscribed_ = 0.0;
   double max_unknown_fraction_ = 0.2;
+  std::vector<Sensor> sensors_;
+  double map_cell_ = 0.1;
 };
 
 // Polygon helpers for counter-clockwise convex polygons.

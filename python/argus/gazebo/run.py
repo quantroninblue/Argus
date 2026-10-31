@@ -35,7 +35,8 @@ from argus.sim.episode import _Judge
 from argus.sim.grpc_episode import _Background
 from argus.sim.world import World
 
-from .robot import isolated_env, start_process, start_robot, stop_process
+from .procs import reaping, start_process, stop_process
+from .robot import isolated_env, start_robot
 from .runlog import RosRecorder, write_run_log
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -97,9 +98,19 @@ def run_gazebo_episode(doc: dict, world: World, start, goal, duration_s: float, 
     A run log (runlog.py) is written to `<workdir>/log`. With `log_store`, it moves into the
     store instead, where reading it deletes it unless `keep_log`; a work directory made here is
     then removed too, since it holds the run's keys. `record_bag` adds an mcap recording of
-    every bridged ROS 2 topic (large: depth images are about 1 MB/s)."""
+    every bridged ROS 2 topic (large: depth images are about 1 MB/s).
+
+    However the run ends (finished, Ctrl-C, SIGTERM, or this process killed), its processes
+    are stopped and the private keys in the work directory are deleted; logs stay."""
     work = Path(workdir or tempfile.mkdtemp(prefix="argus-gazebo-"))
     work.mkdir(parents=True, exist_ok=True)
+    with reaping(work):
+        return _run(doc, world, start, goal, duration_s, tolerance_m, gui, work, workdir is None, log_store,
+                    keep_log, record_bag)
+
+
+def _run(doc, world, start, goal, duration_s, tolerance_m, gui, work: Path, made_work: bool,
+         log_store, keep_log, record_bag) -> GazeboEpisode:
     out = GazeboEpisode(workdir=str(work))
 
     (work / "profile.yaml").write_text(profiles.dump(doc))
@@ -205,5 +216,5 @@ def run_gazebo_episode(doc: dict, world: World, start, goal, duration_s: float, 
         if log_store is not None:
             out.run_id = log_store.add(log_dir, keep=keep_log)
             out.log_dir = str(log_store.path(out.run_id))
-            if workdir is None:
+            if made_work:
                 shutil.rmtree(work, ignore_errors=True)

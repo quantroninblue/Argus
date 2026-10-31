@@ -34,8 +34,9 @@ struct SafetyConfig {
   // controller timeout and planner period.
   double command_lease_s = 0.0;
   double odometry_max_age_s = 0.25;
-  // Share of the swept body that may be unobserved before the envelope counts as unknown.
-  double max_unknown_fraction = 0.2;
+  // Share of the swept body that may be unknown and never looked at by a sensor before the
+  // envelope counts as unknown. Cells between a frame's rays do not count (view.hpp).
+  double max_unknown_fraction = 0.0;
   double envelope_spacing_m = 0.05;
   // Longest stretch a body may creep through directions it cannot see before it has to move
   // where it can again. Capped further at the body's own length.

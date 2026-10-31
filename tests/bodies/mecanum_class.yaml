@@ -1,0 +1,79 @@
+# Mecanum base class (Ridgeback style): omnidirectional, 2D scanners front and rear.
+# Dimensions and limits approximate, from public specifications.
+argus_profile: 1
+id: ref-mecanum-class
+name: Mecanum base class
+
+geometry:
+  ground_z_m: 0.0
+  shapes:
+    - type: box
+      size_m: [0.96, 0.79, 0.27]
+      pose: {xyz_m: [0.0, 0.0, 0.175]}
+  frames:
+    front_scan: {xyz_m: [0.4, 0.0, 0.2]}
+    rear_scan: {xyz_m: [-0.4, 0.0, 0.2], rpy_rad: [0.0, 0.0, 3.14159265]}
+    imu: {xyz_m: [0.0, 0.0, 0.15]}
+    wheels: {xyz_m: [0.0, 0.0, 0.1]}
+
+motion:
+  space: planar
+  can_reverse: true
+  can_strafe: true
+  min_turn_radius_m: 0.0
+  collision_padding_m: 0.05
+  limits:
+    x: {velocity_mps: [-1.1, 1.1], accel_mps2: 0.8, decel_mps2: 1.2}
+    y: {velocity_mps: [-1.1, 1.1], accel_mps2: 0.8, decel_mps2: 1.2}
+    z: {velocity_mps: [0.0, 0.0]}
+    yaw: {rate_radps: 2.0, accel_radps2: 3.0}
+
+control:
+  interface: velocity
+  transport: ros2
+  endpoint: /cmd_vel
+  rate_hz: 50
+  latency_s: 0.08
+  controller_timeout_s: 0.3
+
+failsafe:
+  link_lost_after_s: 3.0
+  on_link_lost: stop
+  uncovered_motion: forbid
+
+sensors:
+  - id: front_scan
+    kind: range_2d
+    frame: front_scan
+    source: {transport: ros2, endpoint: /front/scan}
+    rate_hz: 40
+    range_m: [0.06, 10.0]
+    fov_deg: {h: 270, v: 1.0}
+  - id: rear_scan
+    kind: range_2d
+    frame: rear_scan
+    source: {transport: ros2, endpoint: /rear/scan}
+    rate_hz: 40
+    range_m: [0.06, 10.0]
+    fov_deg: {h: 270, v: 1.0}
+  - id: imu
+    kind: imu
+    frame: imu
+    source: {transport: ros2, endpoint: /imu/data}
+    rate_hz: 100
+  - id: wheel_odom
+    kind: wheel_odom
+    frame: wheels
+    source: {transport: ros2, endpoint: /odom}
+    rate_hz: 50
+
+
+compute:
+  board: vicharak_axon
+  accelerator: rk3588_npu
+
+# A scanner below the top of the body: no overhangs, and nothing shorter than the scan
+# plane, which the format states as obstacles at least as tall as the body.
+assumptions:
+  min_obstacle_height_m: 0.32
+  clear_at_start_m: 0.5

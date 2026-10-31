@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import os
 import random
-import signal
 import subprocess
 import threading
 from dataclasses import dataclass, field
@@ -24,7 +23,9 @@ from rclpy.parameter import Parameter
 from argus import profile as profiles
 from argus.sim.world import World
 
+from . import procs
 from .model import Topics, model_sdf
+from .procs import start_process, stop_process
 from .world import bridge_entries, bridge_yaml, world_sdf
 
 # The bridge carries commands to Gazebo from here; the motor controller feeds it.
@@ -44,21 +45,6 @@ def isolated_env() -> dict:
     return env
 
 
-def start_process(cmd: list[str], log: Path, env: dict) -> subprocess.Popen:
-    return subprocess.Popen(cmd, stdout=log.open("w"), stderr=subprocess.STDOUT, env=env, start_new_session=True)
-
-
-def stop_process(p: subprocess.Popen, sig=signal.SIGINT, wait_s: float = 5.0) -> None:
-    if p.poll() is not None:
-        return
-    try:
-        os.killpg(p.pid, sig)
-        p.wait(wait_s)
-    except (subprocess.TimeoutExpired, ProcessLookupError):
-        try:
-            os.killpg(p.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
 
 
 class MotorController:
@@ -109,6 +95,8 @@ class GazeboRobot:
     entries: list
     procs: list = field(default_factory=list)
     controller: MotorController | None = None
+    # Set when the robot was started outside a run that already reaps its processes.
+    reaping: object | None = None
 
     def alive(self) -> bool:
         return all(p.poll() is None for p in self.procs)
@@ -120,16 +108,22 @@ class GazeboRobot:
         if self.controller is not None:
             self.controller.close()
             self.controller = None
+        if self.reaping is not None:
+            self.reaping.__exit__(None, None, None)
+            self.reaping = None
 
 
 def start_robot(doc: dict, world: World, start, work: Path, env: dict, gui: bool = False,
-                controller_timeout: bool = True) -> GazeboRobot:
+                controller_timeout: bool = True, odom_scale: float = 1.0) -> GazeboRobot:
     """Starts Gazebo, the bridge and the motor controller. Needs rclpy initialised."""
-    model, topics = model_sdf(doc, "robot", start)
+    model, topics = model_sdf(doc, "robot", start, odom_scale=odom_scale)
     entries = bridge_entries(doc, topics, command_topic=DRIVE_TOPIC)
     (work / "world.sdf").write_text(world_sdf(world, [model]))
     (work / "bridge.yaml").write_text(bridge_yaml(entries))
     robot = GazeboRobot(model=model, topics=topics, entries=entries)
+    if procs._active is None:
+        robot.reaping = procs.reaping(work)
+        robot.reaping.__enter__()
     robot.procs.append(start_process(["gz", "sim", "-s", "-r", "--headless-rendering", str(work / "world.sdf")],
                                      work / "gz.log", env))
     if gui:

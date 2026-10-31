@@ -604,10 +604,14 @@ Profile parse(const YAML::Node& root) {
   }
 
   if (auto n = r.child(root, "assumptions", "", false); n && r.expect_map(n, "assumptions")) {
-    r.only_keys(n, "assumptions", {"min_obstacle_height_m"});
+    r.only_keys(n, "assumptions", {"min_obstacle_height_m", "clear_at_start_m"});
     p.assumed_min_obstacle_height_m = r.number(n, "min_obstacle_height_m", "assumptions", false);
     if (p.assumed_min_obstacle_height_m && *p.assumed_min_obstacle_height_m < 0.0) {
       r.fail("assumptions.min_obstacle_height_m", "must not be negative");
+    }
+    p.assumed_clear_at_start_m = r.number(n, "clear_at_start_m", "assumptions", false);
+    if (p.assumed_clear_at_start_m && *p.assumed_clear_at_start_m < 0.0) {
+      r.fail("assumptions.clear_at_start_m", "must not be negative");
     }
   }
 

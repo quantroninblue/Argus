@@ -69,3 +69,8 @@ sensors:
 compute:
   board: vicharak_axon
   accelerator: rk3588_npu
+
+# The lidar looks 30 degrees up and down and the depth camera straight down, so a ring around
+# the body is out of view until it has flown a little. Take off from a clear spot.
+assumptions:
+  clear_at_start_m: 0.5

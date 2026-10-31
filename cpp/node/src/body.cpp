@@ -73,6 +73,45 @@ Cell BodyVolume::column(const LocalMap& map, int ix, int iy, int z0, int z1) con
   return free ? Cell::Free : Cell::Unknown;
 }
 
+bool BodyVolume::column_viewed(const LocalMap& map, int ix, int iy, int z0, int z1) const {
+  for (int iz = z0; iz <= z1; ++iz) {
+    if (map.viewed(Index3(ix, iy, iz))) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool BodyVolume::out_of_vertical_view(const Pose4& pose, const Vec3& point, bool& covered, bool& in_view) const {
+  const Eigen::Isometry3d base = pose.transform();
+  for (const Sensor& s : sensors_) {
+    const Vec3 q = (base * s.mount).inverse() * point;
+    const double flat = std::hypot(q.x(), q.y());
+    if (flat > s.max_range_m) {
+      continue;
+    }
+    const double h = s.layout.fov_h_rad;
+    if (h < 2.0 * M_PI - 1e-6 && std::abs(std::atan2(q.y(), q.x())) > h / 2.0) {
+      continue;
+    }
+    covered = true;
+    const bool vertical = s.layout.rows == 1 ? std::abs(q.z()) <= 0.5 * map_cell_
+                                             : std::abs(std::atan2(q.z(), flat)) <= s.layout.fov_v_rad / 2.0;
+    in_view = in_view || vertical;
+  }
+  return covered && !in_view;
+}
+
+bool BodyVolume::column_out_of_vertical_view(const LocalMap& map, const Pose4& pose, int ix, int iy, int z0,
+                                             int z1) const {
+  bool covered = false;
+  bool in_view = false;
+  for (int iz = z0; iz <= z1 && !in_view; ++iz) {
+    out_of_vertical_view(pose, map.center_of(Index3(ix, iy, iz)), covered, in_view);
+  }
+  return covered && !in_view;
+}
+
 Contact BodyVolume::contact(const LocalMap& map, const Pose4& pose, const Pose4* here) const {
   return planar_ ? planar_contact(map, pose, here) : aerial_contact(map, pose, here);
 }
@@ -111,7 +150,8 @@ Contact BodyVolume::planar_contact(const LocalMap& map, const Pose4& pose, const
         }
         return Contact::Occupied;
       }
-      if (state == Cell::Unknown && !here_cell) {
+      if (state == Cell::Unknown && !here_cell && !column_viewed(map, ix, iy, a.z(), b.z()) &&
+          !column_out_of_vertical_view(map, pose, ix, iy, a.z(), b.z())) {
         ++unknown;
       }
     }
@@ -148,7 +188,9 @@ Contact BodyVolume::aerial_contact(const LocalMap& map, const Pose4& pose, const
           }
           return Contact::Occupied;
         }
-        if (state == Cell::Unknown && !here_cell) {
+        bool covered = false;
+        bool in_view = false;
+        if (state == Cell::Unknown && !here_cell && !map.viewed(i) && !out_of_vertical_view(pose, c, covered, in_view)) {
           ++unknown;
         }
       }

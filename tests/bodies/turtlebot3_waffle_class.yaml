@@ -1,0 +1,70 @@
+# TurtleBot3 Waffle class: small differential base with a 360 degree scanner on top.
+# Dimensions and limits approximate, from the public specification.
+argus_profile: 1
+id: ref-turtlebot3-waffle-class
+name: TurtleBot3 Waffle class
+
+geometry:
+  ground_z_m: 0.0
+  shapes:
+    - type: box
+      size_m: [0.281, 0.306, 0.131]
+      pose: {xyz_m: [-0.03, 0.0, 0.075]}
+  frames:
+    scan: {xyz_m: [-0.064, 0.0, 0.13]}
+    imu: {xyz_m: [0.0, 0.0, 0.07]}
+    wheels: {xyz_m: [0.0, 0.0, 0.033]}
+
+motion:
+  space: planar
+  can_reverse: true
+  can_strafe: false
+  min_turn_radius_m: 0.0
+  collision_padding_m: 0.03
+  limits:
+    x: {velocity_mps: [-0.26, 0.26], accel_mps2: 0.5, decel_mps2: 1.0}
+    y: {velocity_mps: [0.0, 0.0]}
+    z: {velocity_mps: [0.0, 0.0]}
+    yaw: {rate_radps: 1.8, accel_radps2: 3.0}
+
+control:
+  interface: velocity
+  transport: ros2
+  endpoint: /cmd_vel
+  rate_hz: 20
+  latency_s: 0.08
+  controller_timeout_s: 0.5
+
+failsafe:
+  link_lost_after_s: 3.0
+  on_link_lost: stop
+  uncovered_motion: forbid
+
+sensors:
+  - id: scan
+    kind: range_2d
+    frame: scan
+    source: {transport: ros2, endpoint: /scan}
+    rate_hz: 5
+    range_m: [0.12, 3.5]
+    fov_deg: {h: 360, v: 1.0}
+  - id: imu
+    kind: imu
+    frame: imu
+    source: {transport: ros2, endpoint: /imu}
+    rate_hz: 100
+  - id: wheel_odom
+    kind: wheel_odom
+    frame: wheels
+    source: {transport: ros2, endpoint: /odom}
+    rate_hz: 30
+
+
+compute:
+  board: vicharak_axon
+  accelerator: rk3588_npu
+
+# One scan plane at 13 cm on a 14 cm body: obstacles must be at least that tall.
+assumptions:
+  min_obstacle_height_m: 0.15
+  clear_at_start_m: 0.5

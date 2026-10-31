@@ -3,6 +3,7 @@ add_library(argus_node
   src/ray_pattern.cpp
   src/local_map.cpp
   src/body.cpp
+  src/view.cpp
   src/motion.cpp
   src/workspace.cpp
   src/mission.cpp

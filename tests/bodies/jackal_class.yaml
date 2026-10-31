@@ -1,0 +1,72 @@
+# Jackal class: small outdoor skid-steer base with a 3D lidar on a mast.
+# Dimensions and limits approximate, from the public specification.
+argus_profile: 1
+id: ref-jackal-class
+name: Jackal class
+
+geometry:
+  ground_z_m: 0.0
+  shapes:
+    - type: box
+      size_m: [0.508, 0.43, 0.185]
+      pose: {xyz_m: [0.0, 0.0, 0.1575]}
+    - type: cylinder
+      radius_m: 0.05
+      length_m: 0.17
+      pose: {xyz_m: [0.0, 0.0, 0.335]}
+  frames:
+    lidar: {xyz_m: [0.0, 0.0, 0.46]}
+    imu: {xyz_m: [0.0, 0.0, 0.15]}
+    wheels: {xyz_m: [0.0, 0.0, 0.1]}
+
+motion:
+  space: planar
+  can_reverse: true
+  can_strafe: false
+  min_turn_radius_m: 0.0
+  collision_padding_m: 0.05
+  limits:
+    x: {velocity_mps: [-1.0, 2.0], accel_mps2: 1.0, decel_mps2: 2.0}
+    y: {velocity_mps: [0.0, 0.0]}
+    z: {velocity_mps: [0.0, 0.0]}
+    yaw: {rate_radps: 2.0, accel_radps2: 4.0}
+
+control:
+  interface: velocity
+  transport: ros2
+  endpoint: /cmd_vel
+  rate_hz: 50
+  latency_s: 0.06
+  controller_timeout_s: 0.3
+
+failsafe:
+  link_lost_after_s: 2.0
+  on_link_lost: stop
+  uncovered_motion: forbid
+
+sensors:
+  - id: lidar
+    kind: range_3d
+    frame: lidar
+    source: {transport: ros2, endpoint: /points}
+    rate_hz: 10
+    range_m: [0.3, 100.0]
+    fov_deg: {h: 360, v: 45}
+  - id: imu
+    kind: imu
+    frame: imu
+    source: {transport: ros2, endpoint: /imu/data}
+    rate_hz: 100
+  - id: wheel_odom
+    kind: wheel_odom
+    frame: wheels
+    source: {transport: ros2, endpoint: /odom}
+    rate_hz: 50
+
+
+compute:
+  board: vicharak_axon
+  accelerator: rk3588_npu
+
+assumptions:
+  clear_at_start_m: 0.5

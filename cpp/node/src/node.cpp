@@ -76,12 +76,37 @@ Node::Node(capabilities::Profile profile, NodeConfig config)
     s.mount = profile_.geometry.frames.at(spec.frame).transform();
     s.pattern = make_ray_pattern(spec, config_.rays);
     s.self_hits = self_hit_distances(profile_.geometry.shapes, s.mount, s.pattern, spec.range_m->max);
+    s.view.rows = s.pattern.rows;
+    s.view.cols = s.pattern.cols;
+    s.view.fov_h_rad = spec.fov_h_deg.value_or(0.0) * M_PI / 180.0;
+    s.view.fov_v_rad = spec.kind == capabilities::SensorKind::Range2d ? 0.0 : spec.fov_v_deg.value_or(0.0) * M_PI / 180.0;
+    s.view.min_range_m = spec.range_m->min;
     sensors_[spec.id] = std::move(s);
     clock_.max_age[spec.id] = spec.max_age_s;
   }
 
+  // Views are kept out past the stopping reach at top speed by the largest near blind gap a
+  // covered direction may have (DeriveOptions::max_near_gap_m), so space seen on the way is
+  // still marked as viewed when the body gets there.
+  double stop = 0.0;
+  const auto& m = caps_.motion;
+  for (auto [axis, cap] : {std::pair{capabilities::Axis::X, &m.x}, {capabilities::Axis::Y, &m.y},
+                           {capabilities::Axis::Z, &m.z}}) {
+    const double top = std::max(std::abs(cap->min_mps), std::abs(cap->max_mps));
+    if (cap->enabled() && top > 0.0) {
+      stop = std::max(stop, top * (control_period_ + m.latency_s) + m.stopping_distance_m(axis, top));
+    }
+  }
+  view_radius_m_ = std::min(caps_.collision.bounding_radius_m + stop + capabilities::DeriveOptions{}.max_near_gap_m,
+                            map_.config().half_width_m);
+
   body_ = std::make_unique<BodyVolume>(caps_, ground_z_, config_.min_obstacle_height_m,
                                        config_.safety.max_unknown_fraction);
+  std::vector<BodyVolume::Sensor> geometry;
+  for (const auto& [id, s] : sensors_) {
+    geometry.push_back({s.mount, s.view, s.spec->range_m->max});
+  }
+  body_->set_sensors(std::move(geometry), map_.resolution());
   motion_ = std::make_unique<MotionModel>(caps_.motion);
   supervisor_ = std::make_unique<SafetySupervisor>(caps_, *body_, *motion_, config_.safety, control_period_,
                                                    config_.planner.period_s, clock_.max_age);
@@ -114,6 +139,7 @@ void Node::on_odometry(const Odometry& odom) {
   if (have_odom_ && odom.stamp < odom_.stamp) {
     return;
   }
+  const bool first = !have_odom_;
   odom_ = odom;
   have_odom_ = true;
   history_.push_back(odom);
@@ -121,6 +147,13 @@ void Node::on_odometry(const Odometry& odom) {
     history_.pop_front();
   }
   map_.recenter(odom.pose.position);
+  if (first && caps_.assumed_clear_at_start_m > 0.0) {
+    double lo = 0.0;
+    double hi = 0.0;
+    view_band(odom.pose.position, lo, hi);
+    mark_zone_viewed(map_, odom.pose.position, caps_.collision.bounding_radius_m + caps_.assumed_clear_at_start_m,
+                     lo, hi);
+  }
   if (crumbs_.empty() || (crumbs_.back() - odom.pose.position).norm() >= config_.breadcrumb_spacing_m) {
     crumbs_.push_back(odom.pose.position);
     if (crumbs_.size() > config_.max_breadcrumbs) {
@@ -161,6 +194,19 @@ bool Node::pose_at(double stamp, Pose4& pose) const {
   return true;
 }
 
+void Node::view_band(const Vec3& at, double& lo, double& hi) const {
+  // The heights the body can hit: its band for planar bodies, its sphere's extent (plus a
+  // cell) for aerial ones, which move vertically too and whose band moves with them.
+  if (caps_.motion.space == MotionSpace::Planar) {
+    lo = at.z() + body_->z_low_m();
+    hi = at.z() + body_->z_high_m();
+  } else {
+    const double r = body_->radius_m() + map_.resolution();
+    lo = at.z() - r;
+    hi = at.z() + r;
+  }
+}
+
 bool Node::on_range_frame(const RangeFrame& frame) {
   const auto it = sensors_.find(frame.sensor_id);
   if (it == sensors_.end()) {
@@ -185,6 +231,8 @@ bool Node::on_range_frame(const RangeFrame& frame) {
   std::vector<bool> hits;
   ends.reserve(frame.ranges.size());
   hits.reserve(frame.ranges.size());
+  // How far each ray saw free space, for telling cells between rays from unseen ones.
+  std::vector<float> free_m(frame.ranges.size(), std::numeric_limits<float>::quiet_NaN());
   for (size_t i = 0; i < frame.ranges.size(); ++i) {
     if (std::isfinite(s.self_hits[i])) {
       continue;  // this ray looks at the robot itself
@@ -198,6 +246,7 @@ bool Node::on_range_frame(const RangeFrame& frame) {
     if (!hit && !config_.no_return_is_free) {
       continue;
     }
+    free_m[i] = static_cast<float>(hit ? r : max_range);
     const Vec3 end = origin + dir * (hit ? r : max_range);
     if (hit && planar && end.z() < ground) {
       hit = false;
@@ -206,6 +255,15 @@ bool Node::on_range_frame(const RangeFrame& frame) {
     hits.push_back(hit);
   }
   map_.integrate(origin, ends, hits);
+  RangeView view;
+  view.layout = &s.view;
+  view.odom_to_sensor = to_odom.inverse();
+  view.free_m = &free_m;
+  view.cell_m = map_.resolution();
+  double lo = 0.0;
+  double hi = 0.0;
+  view_band(pose.position, lo, hi);
+  mark_viewed(map_, view, pose.position, view_radius_m_, lo, hi);
   double& last = clock_.last_frame[frame.sensor_id];
   last = std::max(last, frame.stamp);
   return true;

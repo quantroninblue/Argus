@@ -63,6 +63,14 @@ def capability_report(doc: dict) -> str:
     if caps.assumed_obstacle_height_m > 0:
         lines.append(f"  assumed (declared): obstacles stand on the ground and are at least "
                      f"{caps.assumed_obstacle_height_m * 100:.0f} cm tall")
+    lines.append("  space only above or below the sensors' vertical view is assumed clear; Argo does not "
+                 "see obstacles there")
+    if caps.assumed_clear_at_start_m > 0:
+        lines.append(f"  assumed (declared): the space within {caps.assumed_clear_at_start_m:g} m of the robot "
+                     "where Argo starts is clear; place it accordingly")
+    else:
+        lines.append("  no clear space declared where Argo starts (assumptions.clear_at_start_m): space next to "
+                     "the robot that no sensor sees yet stops its first moves")
     lines.append("")
     prov = doc.get("provenance", {})
     unverified = sorted(k for k, v in prov.items() if v in ("declared", "cad", "llm_draft"))

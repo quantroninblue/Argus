@@ -50,7 +50,8 @@ PYBIND11_MODULE(capabilities, m) {
       .def_readwrite("evaluation_range_m", &DeriveOptions::evaluation_range_m)
       .def_readwrite("sample_step_m", &DeriveOptions::sample_step_m)
       .def_readwrite("band_height_m", &DeriveOptions::band_height_m)
-      .def_readwrite("min_obstacle_height_m", &DeriveOptions::min_obstacle_height_m);
+      .def_readwrite("min_obstacle_height_m", &DeriveOptions::min_obstacle_height_m)
+      .def_readwrite("max_near_gap_m", &DeriveOptions::max_near_gap_m);
 
   py::class_<AxisCapability>(m, "AxisCapability")
       .def_readonly("min_mps", &AxisCapability::min_mps)
@@ -141,6 +142,7 @@ PYBIND11_MODULE(capabilities, m) {
                              [](const Capabilities& c) { return failsafe_dict(c.failsafe); })
       .def_readonly("min_obstacle_height_m", &Capabilities::min_obstacle_height_m)
       .def_readonly("assumed_obstacle_height_m", &Capabilities::assumed_obstacle_height_m)
+      .def_readonly("assumed_clear_at_start_m", &Capabilities::assumed_clear_at_start_m)
       .def_readonly("safety_ready", &Capabilities::safety_ready)
       .def_readonly("unreviewed_fields", &Capabilities::unreviewed_fields);
 

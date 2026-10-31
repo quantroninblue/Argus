@@ -171,8 +171,11 @@ def _limits(lim: dict) -> str:
             f"<max_acceleration>{max(accel, decel):.6g}</max_acceleration>")
 
 
-def model_sdf(doc: dict, name: str = "robot", pose=(0.0, 0.0, 0.0, 0.0)) -> tuple[str, Topics]:
-    """SDF for the body in `doc`, placed at (x, y, z, yaw), and the topics it uses."""
+def model_sdf(doc: dict, name: str = "robot", pose=(0.0, 0.0, 0.0, 0.0), odom_scale: float = 1.0) -> tuple[str, Topics]:
+    """SDF for the body in `doc`, placed at (x, y, z, yaw), and the topics it uses.
+
+    `odom_scale` tells a differential drive its wheels are that much larger than they are, as
+    a wrong wheel radius in a robot's driver does: odometry then overstates distance by it."""
     motion = doc["motion"]
     if motion["space"] != "planar":
         raise ValueError("Gazebo models for aerial bodies are not supported yet")
@@ -252,7 +255,7 @@ def model_sdf(doc: dict, name: str = "robot", pose=(0.0, 0.0, 0.0, 0.0)) -> tupl
         drive_plugin = (
             '<plugin filename="gz-sim-diff-drive-system" name="gz::sim::systems::DiffDrive">'
             "<left_joint>left_wheel_joint</left_joint><right_joint>right_wheel_joint</right_joint>"
-            f"<wheel_separation>{separation:.6g}</wheel_separation><wheel_radius>{radius:.6g}</wheel_radius>"
+            f"<wheel_separation>{separation:.6g}</wheel_separation><wheel_radius>{radius * odom_scale:.6g}</wheel_radius>"
             f"<max_linear_acceleration>{accel}</max_linear_acceleration>"
             f"<min_linear_acceleration>{-decel}</min_linear_acceleration>"
             f"<max_angular_acceleration>{yaw.get('accel_radps2', 2.0)}</max_angular_acceleration>"
