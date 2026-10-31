@@ -35,6 +35,8 @@ class IntakeConfig:
     min_burst_bytes: float = 256_000.0
     # Weight of the newest step in each robot's demand estimate.
     demand_weight: float = 0.3
+    # Seconds over which a robot's reported evidence backlog counts as demand.
+    backlog_s: float = 3.0
 
 
 def parse_rate(text: str) -> float:
@@ -92,7 +94,10 @@ class Intake:
         cpu = 0.0
         for s in sessions:
             offered, spent = s.take_evidence_counters()
-            s.evidence_demand = (1 - c.demand_weight) * s.evidence_demand + c.demand_weight * offered / dt
+            # What the robot sent plus the backlog it reports holding back (cleared over a few
+            # seconds), so a robot that obeys its budget still shows what it wants.
+            wanted = offered / dt + getattr(s, "evidence_backlog", 0) / c.backlog_s
+            s.evidence_demand = (1 - c.demand_weight) * s.evidence_demand + c.demand_weight * wanted
             cpu += spent
         if cpu / dt > c.cpu_share:
             self.capacity = max(0.05 * c.bytes_per_s, 0.8 * self.capacity)

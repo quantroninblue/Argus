@@ -317,5 +317,8 @@ PYBIND11_MODULE(node, m) {
       .def_property_readonly("link_state", [](const Session& s) { return to_string(s.link_state()); })
       .def_property_readonly("round_trip_s", [](const Session& s) { return s.link().round_trip_s(); })
       .def_property_readonly("map_epoch", &Session::map_epoch)
-      .def_property_readonly("evidence_bytes", &Session::evidence_bytes);
+      .def_property_readonly("evidence_bytes", &Session::evidence_bytes)
+      .def_property_readonly("evidence_backlog_bytes", [](const Session& s) { return s.evidence().backlog_bytes(); })
+      .def_property_readonly("evidence_unacked", [](const Session& s) { return s.evidence().unacked(); })
+      .def_property_readonly("evidence_budget", &Session::evidence_budget);
 }

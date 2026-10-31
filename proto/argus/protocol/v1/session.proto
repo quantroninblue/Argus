@@ -69,4 +69,11 @@ message Heartbeat {
   Stamp sent = 2;
   uint64 echo_seq = 3;
   Stamp echo_sent = 4;
+  // Hub to node: the highest LocalEvidence seq of the node's current stream the hub has taken
+  // (applied, or dropped as over budget). Argo resends what is older and not yet covered.
+  uint64 evidence_ack_seq = 5;
+  // Hub to node: evidence bytes per second this robot may send; 0 when the hub sets no limit.
+  uint64 evidence_budget_bytes_per_s = 6;
+  // Node to hub: evidence bytes waiting to be sent, so the hub sees the demand it holds back.
+  uint64 evidence_pending_bytes = 7;
 }

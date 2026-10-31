@@ -75,6 +75,10 @@ message LocalEvidence {
   double resolution_m = 4;
   EvidenceEncoding encoding = 5;
   bytes payload = 6;
+  // Numbered from 1 within a stream; a resent message keeps its number, so the hub applies
+  // it once. A new stream (Argo restarted) starts again at 1.
+  uint64 seq = 7;
+  uint64 stream = 8;
 }
 
 enum EventKind {

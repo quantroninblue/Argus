@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
+#include <random>
 
 #include "argus/grid/evidence.hpp"
 
@@ -92,7 +94,100 @@ pb::LinkState to_proto(LinkState s) {
 
 }  // namespace
 
-Session::Session(Node& node, SessionConfig config) : node_(node), config_(std::move(config)), link_(config_.link) {
+namespace {
+
+uint64_t new_stream_id() {
+  std::random_device rd;
+  return (static_cast<uint64_t>(rd()) << 32) ^ rd() ^ 1u;  // never 0
+}
+
+std::tuple<int, int, int> key(const Index3& i) { return {i.x(), i.y(), i.z()}; }
+
+}  // namespace
+
+EvidenceOutbox::EvidenceOutbox(uint64_t stream, size_t max_pending_cells, size_t max_unacked_bytes)
+    : stream_(stream), max_pending_cells_(max_pending_cells), max_unacked_bytes_(max_unacked_bytes) {}
+
+void EvidenceOutbox::add(const std::vector<CellDelta>& deltas) {
+  for (const CellDelta& d : deltas) {
+    auto& tile = pending_[key(grid::tile_of(d.index))];
+    auto [it, inserted] = tile.try_emplace(key(d.index), 0);
+    it->second += d.delta;
+    pending_cells_ += inserted;
+  }
+  while (pending_cells_ > max_pending_cells_ && !pending_.empty()) {
+    pending_cells_ -= pending_.begin()->second.size();
+    dropped_cells_ += pending_.begin()->second.size();
+    pending_.erase(pending_.begin());
+  }
+}
+
+std::optional<EvidenceOutbox::Batch> EvidenceOutbox::next(size_t max_bytes, double now) {
+  constexpr size_t kHeader = 4;
+  constexpr size_t kTileHeader = 14;
+  constexpr size_t kCell = 3;
+  std::vector<CellDelta> cells;
+  size_t bytes = kHeader;
+  while (!pending_.empty()) {
+    const auto& tile = pending_.begin()->second;
+    const size_t size = kTileHeader + kCell * tile.size();
+    if (bytes + size > max_bytes) {
+      break;
+    }
+    bytes += size;
+    for (const auto& [c, delta] : tile) {
+      cells.push_back({Index3(std::get<0>(c), std::get<1>(c), std::get<2>(c)), delta});
+    }
+    pending_cells_ -= tile.size();
+    pending_.erase(pending_.begin());
+  }
+  if (cells.empty()) {
+    return std::nullopt;
+  }
+  Batch b{++seq_, grid::encode_evidence(cells)};
+  unacked_.push_back({b.seq, b.payload, now});
+  unacked_bytes_ += b.payload.size();
+  while (unacked_bytes_ > max_unacked_bytes_ && unacked_.size() > 1) {
+    unacked_bytes_ -= unacked_.front().payload.size();
+    unacked_.pop_front();  // lost: the hub plans around the gap until the place is seen again
+  }
+  return b;
+}
+
+void EvidenceOutbox::ack(uint64_t seq) {
+  while (!unacked_.empty() && unacked_.front().seq <= seq) {
+    unacked_bytes_ -= unacked_.front().payload.size();
+    unacked_.pop_front();
+  }
+}
+
+std::vector<EvidenceOutbox::Batch> EvidenceOutbox::due(double now, double timeout_s, size_t max_bytes) {
+  std::vector<Batch> out;
+  size_t bytes = 0;
+  for (Sent& s : unacked_) {
+    if (now - s.at < timeout_s || bytes + s.payload.size() > max_bytes) {
+      break;
+    }
+    bytes += s.payload.size();
+    s.at = now;
+    out.push_back({s.seq, s.payload});
+  }
+  return out;
+}
+
+size_t EvidenceOutbox::backlog_bytes() const {
+  size_t bytes = unacked_bytes_;
+  for (const auto& [t, cells] : pending_) {
+    bytes += 14 + 3 * cells.size();
+  }
+  return bytes;
+}
+
+Session::Session(Node& node, SessionConfig config)
+    : node_(node),
+      config_(std::move(config)),
+      link_(config_.link),
+      outbox_(new_stream_id(), config_.max_pending_cells, config_.max_unacked_bytes) {
   LinkConfig link = config_.link;
   link.lost_after_s = node_.profile().failsafe.link_lost_after_s;
   link.heartbeat_period_s = config_.heartbeat_period_s;
@@ -188,6 +283,8 @@ void Session::receive(const pb::HubMessage& m, double now) {
       hub_heartbeat_seq_ = m.heartbeat().seq();
       hub_heartbeat_sent_ = m.heartbeat().sent().unix_nanos();
       link_.on_heartbeat(m.heartbeat().echo_seq(), now);
+      outbox_.ack(m.heartbeat().evidence_ack_seq());
+      budget_bps_ = static_cast<double>(m.heartbeat().evidence_budget_bytes_per_s());
       break;
     case pb::HubMessage::kMissionPlan:
       handle_plan(m.mission_plan(), now);
@@ -336,9 +433,10 @@ TickResult Session::step(double now) {
     }
   }
 
+  // Evidence is kept whatever the link does, merged per cell, and goes out once it can.
+  outbox_.add(node_.take_evidence());
+
   if (!connected_ || !accepted_) {
-    // Evidence is not kept while there is no session; the hub sees the place again later.
-    node_.take_evidence();
     if (connected_ && !rejected_ && now - hello_sent_ >= config_.hello_retry_s) {
       send_hello(now);
     }
@@ -359,6 +457,7 @@ TickResult Session::step(double now) {
     set_stamp(hb->mutable_sent(), now);
     hb->set_echo_seq(hub_heartbeat_seq_);
     hb->mutable_echo_sent()->set_unix_nanos(hub_heartbeat_sent_);
+    hb->set_evidence_pending_bytes(outbox_.backlog_bytes());
     link_.on_sent(heartbeat_seq_, now);
     send(m);
   }
@@ -392,21 +491,54 @@ TickResult Session::step(double now) {
   }
   if (now >= next_evidence_) {
     next_evidence_ = now + config_.evidence_period_s;
-    const std::vector<CellDelta> deltas = node_.take_evidence();
-    if (!deltas.empty()) {
-      pb::NodeMessage m;
-      pb::LocalEvidence* ev = m.mutable_local_evidence();
-      set_stamp(ev->mutable_stamp(), now);
-      ev->set_map_epoch(map_epoch_);
-      set_pose(ev->mutable_map_to_odom(), map_to_odom_);
-      ev->set_resolution_m(node_.map().resolution());
-      ev->set_encoding(pb::EVIDENCE_ENCODING_VOXEL_DELTA);
-      ev->set_payload(grid::encode_evidence(deltas));
-      evidence_bytes_ += ev->payload().size();
-      send(m);
-    }
+    send_evidence(now);
   }
   return tick;
+}
+
+void Session::send_evidence(double now) {
+  // While the link is lost, messages would only be lost with it; they wait instead.
+  if (link_.state() == LinkState::Lost) {
+    return;
+  }
+  // The hub's budget, as a token bucket a little under it, so the hub never has to drop.
+  size_t allowance = config_.max_evidence_message_bytes;
+  if (budget_bps_ > 0.0) {
+    const double rate = 0.9 * budget_bps_;
+    const double burst = std::max(2048.0, 2.0 * config_.evidence_period_s * rate);
+    budget_tokens_ = budget_at_ < 0.0 ? burst : std::min(burst, budget_tokens_ + (now - budget_at_) * rate);
+    budget_at_ = now;
+    allowance = std::min(allowance, static_cast<size_t>(std::max(0.0, budget_tokens_)));
+  }
+  size_t used = 0;
+  // Unacknowledged messages first, oldest first, after a timeout well over the round trip.
+  const double timeout = std::max(1.0, 4.0 * link_.round_trip_s());
+  for (const EvidenceOutbox::Batch& b : outbox_.due(now, timeout, allowance)) {
+    send_evidence_message(b, now);
+    used += b.payload.size();
+  }
+  if (auto b = outbox_.next(allowance - std::min(allowance, used), now)) {
+    send_evidence_message(*b, now);
+    used += b->payload.size();
+  }
+  if (budget_bps_ > 0.0) {
+    budget_tokens_ -= static_cast<double>(used);
+  }
+}
+
+void Session::send_evidence_message(const EvidenceOutbox::Batch& batch, double now) {
+  pb::NodeMessage m;
+  pb::LocalEvidence* ev = m.mutable_local_evidence();
+  set_stamp(ev->mutable_stamp(), now);
+  ev->set_map_epoch(map_epoch_);
+  set_pose(ev->mutable_map_to_odom(), map_to_odom_);
+  ev->set_resolution_m(node_.map().resolution());
+  ev->set_encoding(pb::EVIDENCE_ENCODING_VOXEL_DELTA);
+  ev->set_payload(batch.payload);
+  ev->set_seq(batch.seq);
+  ev->set_stream(outbox_.stream());
+  evidence_bytes_ += ev->payload().size();
+  send(m);
 }
 
 }  // namespace argus::node

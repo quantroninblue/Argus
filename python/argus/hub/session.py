@@ -79,6 +79,12 @@ class HubSession:
         self._evidence_offered = 0
         self._evidence_cpu_s = 0.0
         self.evidence_dropped = 0  # messages over the allotted rate
+        # Evidence numbering (see EvidenceOutbox in Argo): the stream of the Argo run, the
+        # highest seq taken from it, resends ignored, and the backlog Argo reports.
+        self._evidence_stream = 0
+        self.evidence_acked = 0
+        self.evidence_duplicates = 0
+        self.evidence_backlog = 0
         self._beat_seq = 0
         self._seq = 0
         self._stop_sent_for: MissionState | None = None
@@ -143,6 +149,9 @@ class HubSession:
             beat.heartbeat.sent.unix_nanos = nanos(now)
             beat.heartbeat.echo_seq = m.heartbeat.seq
             beat.heartbeat.echo_sent.unix_nanos = m.heartbeat.sent.unix_nanos
+            beat.heartbeat.evidence_ack_seq = self.evidence_acked
+            beat.heartbeat.evidence_budget_bytes_per_s = max(1, int(self.evidence_rate))
+            self.evidence_backlog = m.heartbeat.evidence_pending_bytes
             self._send(beat)
         elif body == "telemetry":
             t = m.telemetry
@@ -154,7 +163,15 @@ class HubSession:
             self._set_failsafe(t.safety == node_messages_pb2.SAFETY_STATE_FAILSAFE)
             self.mission.on_telemetry(t.plan_generation, t.active_waypoint_id)
         elif body == "local_evidence":
-            if not self._evidence_allowed(m.local_evidence.ByteSize(), now):
+            ev = m.local_evidence
+            if ev.stream != self._evidence_stream:
+                self._evidence_stream, self.evidence_acked = ev.stream, 0  # Argo started again
+            if ev.seq and ev.seq <= self.evidence_acked:
+                self.evidence_duplicates += 1  # a resend of something already taken
+                return
+            # Taken either way: a robot over its budget loses what was dropped.
+            self.evidence_acked = max(self.evidence_acked, ev.seq)
+            if not self._evidence_allowed(ev.ByteSize(), now):
                 self.evidence_dropped += 1
             else:
                 started = time.perf_counter()
