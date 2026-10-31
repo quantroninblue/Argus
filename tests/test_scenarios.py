@@ -1,6 +1,8 @@
 """Scenario worlds that need the hub's judgement: dead ends, detours that lead away first, a
 gap blocked mid-run, a sensor failing mid-run, and random link loss over generated bodies."""
 
+import copy
+
 import pytest
 
 from argus import profile as profiles
@@ -148,3 +150,18 @@ def test_creep_is_short_and_a_body_with_no_range_sensor_never_drives(gid):
     assert not ep.collided and ep.violations == []
     if gid == "generated-0008":
         assert ep.distance_m < 0.05
+
+
+@pytest.mark.parametrize("scale", [1.0, 1.15, 1.25])
+def test_car_like_body_reaches_the_goal_when_it_turns_wider_than_declared(scale):
+    # Real steering turns wider than the profile says (Gazebo's front-steered model by about
+    # 15%). A car that may not reverse used to cut the corner into the wall by the gap, or
+    # stop beside its path inside its own turning circle.
+    doc = copy.deepcopy(_example("planar_differential"))
+    doc["id"] = "test-car-like"
+    doc["motion"]["min_turn_radius_m"] = 0.8
+    doc["motion"]["limits"]["yaw"]["rate_radps"] = 0.6
+    ep = run_hub_episode(doc, worlds.wall_with_gap(), (0.0, 0.0, 0.0, 0.0), (5.0, 2.0, 0.0), 60,
+                         options=SimOptions(turn_radius_scale=scale, range_noise_m=0.01))
+    _clean(ep)
+    assert ep.mission_state == MissionState.REACHED

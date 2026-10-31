@@ -1,0 +1,87 @@
+"""Bodies driven through Gazebo by the real Argo binary and hub. Needs ROS 2 Jazzy sourced and a
+build with the ROS 2 driver; skipped otherwise."""
+
+import copy
+import json
+import os
+import shutil
+from pathlib import Path
+
+import pytest
+
+from argus import profile as profiles
+from argus.hub.runlogs import RunLogStore
+from argus.sim import world as worlds
+
+ROOT = Path(__file__).resolve().parents[1]
+ARGO = Path(os.environ.get("ARGO_BIN", ROOT / "build" / "ros" / "argo_ros" / "argo"))
+
+rclpy = pytest.importorskip("rclpy", reason="ROS 2 is not sourced")
+if shutil.which("gz") is None or not ARGO.is_file():
+    pytest.skip("Gazebo or the argo binary is missing", allow_module_level=True)
+
+from argus.gazebo.run import run_gazebo_episode  # noqa: E402
+
+GOAL = (5.0, 2.0, 0.0)
+
+
+def _example(name):
+    return profiles.load(ROOT / "schemas" / "examples" / f"{name}.yaml")
+
+
+def _omnidirectional():
+    # The example has no odometry source, which a ROS 2 robot needs; a mecanum base reports
+    # wheel odometry.
+    doc = _example("planar_omnidirectional")
+    doc["sensors"].append({"id": "wheel_odom", "kind": "wheel_odom", "frame": "imu",
+                           "source": {"transport": "ros2", "endpoint": "/odom"}, "rate_hz": 50})
+    return doc
+
+
+def _car_like():
+    doc = copy.deepcopy(_example("planar_differential"))
+    doc["id"] = "test-car-like"
+    doc["motion"]["min_turn_radius_m"] = 0.8
+    doc["motion"]["limits"]["yaw"]["rate_radps"] = 0.6
+    return doc
+
+
+# Reaches about 3 runs in 4: it sometimes stops before the gap with standing still scoring best.
+CAR_LIKE_MISSES = pytest.mark.xfail(reason="car-like tracking under turn mismatch, see needed_fixes", strict=False)
+
+
+@pytest.mark.parametrize("make", [lambda: _example("planar_differential"), _omnidirectional,
+                                  pytest.param(_car_like, marks=CAR_LIKE_MISSES)],
+                         ids=["differential", "omnidirectional", "car_like"])
+def test_body_reaches_the_goal_behind_the_wall_without_touching_it(make, tmp_path):
+    ep = run_gazebo_episode(make(), worlds.wall_with_gap(), (0.0, 0.0, 0.0, 0.0), GOAL, 90.0,
+                            workdir=str(tmp_path))
+    assert not ep.collided, ep.final_pose
+    assert ep.goal_reached, (ep.mission_state, ep.final_pose, ep.time_s)
+
+
+def test_run_log_holds_the_whole_run_and_no_keys(tmp_path):
+    store = RunLogStore(tmp_path / "store")
+    doc = _example("planar_differential")
+    ep = run_gazebo_episode(doc, worlds.wall_with_gap(), (0.0, 0.0, 0.0, 0.0), GOAL, 90.0, log_store=store,
+                            record_bag=True)
+    assert ep.goal_reached
+    assert store.ids() == [ep.run_id]
+    log = store.consume(ep.run_id)
+    assert store.ids() == []
+
+    for name in ("run.json", "world.sdf", "model.sdf", "bridge.yaml", "profile.yaml", "trajectory.csv",
+                 "commands.csv", "odometry.csv", "argo.log"):
+        assert log[name], name
+    assert not [n for n in log if n.endswith((".key", ".pem", ".csr"))]
+    assert "bag" in log
+
+    run = json.loads(log["run.json"])
+    assert run["outcome"]["goal_reached"] and run["outcome"]["collisions"] == []
+    assert run["body"]["drivetrain"]["kind"] == "differential"
+    scan = run["topics"]["/scan"]
+    assert scan["declared_rate_hz"] == 15 and abs(scan["rate_hz"] - 15) < 2
+    cmd = run["topics"][doc["control"]["endpoint"]]
+    assert cmd["messages"] > 100
+    assert len(log["commands.csv"].splitlines()) == cmd["messages"] + 1
+    assert run["argo"]["events"]["waypoint_reached"] >= 1

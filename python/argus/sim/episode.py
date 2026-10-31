@@ -33,6 +33,9 @@ class SimOptions:
     # Single range sensors that stop publishing, by id, from the given time on.
     sensor_fails_at_s: dict[str, float] = field(default_factory=dict)
     seed: int = 0
+    # Bodies with a minimum turn radius turn this much wider than commanded and than the
+    # profile allows, the way real steering does (Gazebo's front-steered model: about 1.15).
+    turn_radius_scale: float = 1.0
     # Keep one row per control tick in Episode.trace.
     trace: bool = False
 
@@ -82,12 +85,13 @@ class Plant:
     flight-controller-like tracker that follows the setpoint moving at its feed-forward velocity.
     """
 
-    def __init__(self, caps, start, lead_s: float):
+    def __init__(self, caps, start, lead_s: float, turn_radius_scale: float = 1.0):
         self.m = caps.motion
         self.interface = caps.control["interface"]
         self.timeout = caps.control["controller_timeout_s"]
         self.latency = self.m.latency_s
         self.lead = lead_s
+        self.turn_scale = turn_radius_scale
         self.pos = np.array(start[:3], dtype=float)
         self.yaw = float(start[3])
         self.vel = np.zeros(3)
@@ -132,7 +136,8 @@ class Plant:
             if not m.can_strafe:
                 self.vel[1] = 0.0
             if m.min_turn_radius_m > 0.0:
-                limit = abs(self.vel[0]) / m.min_turn_radius_m
+                self.w /= self.turn_scale
+                limit = abs(self.vel[0]) / (m.min_turn_radius_m * self.turn_scale)
                 self.w = max(-limit, min(limit, self.w))
         mid = self.yaw + 0.5 * self.w * dt
         self.pos = self.pos + _rot(mid) @ self.vel * dt
@@ -276,7 +281,8 @@ class Simulation:
         self.world = world
         self.caps = profiles.derive(doc)
         self.node = argo.Node(profiles.dump(doc), config or argo.NodeConfig())
-        self.plant = Plant(self.caps, start, self.node.control_period_s + self.caps.motion.latency_s)
+        self.plant = Plant(self.caps, start, self.node.control_period_s + self.caps.motion.latency_s,
+                           self.options.turn_radius_scale)
         self.judge = _Judge(self.caps, doc, self.node.control_period_s)
         rng = np.random.default_rng(self.options.seed)
         specs = {s["id"]: s for s in doc["sensors"]}

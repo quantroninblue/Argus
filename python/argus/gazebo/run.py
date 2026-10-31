@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import os
 import random
+import shutil
 import signal
 import subprocess
 import tempfile
@@ -31,13 +32,15 @@ from rosgraph_msgs.msg import Clock
 from argus import certs
 from argus import profile as profiles
 from argus.hub import Hub, MissionState, Registry
+from argus.hub.runlogs import RunLogStore
 from argus.hub.server import HubServer, TlsFiles
 from argus.sim.episode import _Judge
 from argus.sim.grpc_episode import _Background
 from argus.sim.world import World
 
 from .model import model_sdf
-from .world import bridge_yaml, world_sdf
+from .runlog import RosRecorder, write_run_log
+from .world import bridge_entries, bridge_yaml, world_sdf
 
 ROOT = Path(__file__).resolve().parents[3]
 NODE_ID = "gazebo-robot"
@@ -50,10 +53,13 @@ class GazeboEpisode:
     reached_at_s: float | None = None
     mission_state: str = ""
     collided: bool = False
+    collisions: list = field(default_factory=list)  # {"t_s", "until_s", "pose": [x, y, yaw]} per contact
     final_pose: tuple = ()
     time_s: float = 0.0
     workdir: str = ""
     trace: list = field(default_factory=list)  # (t, x, y, z, yaw) from the true pose
+    log_dir: str = ""  # the run log (see runlog.py), inside the store when one was given
+    run_id: str | None = None  # the run's id in the store
 
 
 class _Watcher:
@@ -82,6 +88,7 @@ class _Watcher:
 
     def close(self) -> None:
         self.executor.shutdown()
+        self.thread.join(5.0)
         self.node.destroy_node()
 
 
@@ -103,9 +110,15 @@ def _stop(p: subprocess.Popen, sig=signal.SIGINT, wait_s: float = 5.0) -> None:
 
 
 def run_gazebo_episode(doc: dict, world: World, start, goal, duration_s: float, tolerance_m: float = 0.4,
-                       gui: bool = False, workdir: str | None = None) -> GazeboEpisode:
+                       gui: bool = False, workdir: str | None = None, log_store: RunLogStore | None = None,
+                       keep_log: bool = False, record_bag: bool = False) -> GazeboEpisode:
     """Sends the body from `start` (x, y, z, yaw) to `goal` through the hub, `duration_s` of
-    simulated time at most. With `gui`, Gazebo's window shows the run."""
+    simulated time at most. With `gui`, Gazebo's window shows the run.
+
+    A run log (runlog.py) is written to `<workdir>/log`. With `log_store`, it moves into the
+    store instead, where reading it deletes it unless `keep_log`; a work directory made here is
+    then removed too, since it holds the run's keys. `record_bag` adds an mcap recording of
+    every bridged ROS 2 topic (large: depth images are about 1 MB/s)."""
     work = Path(workdir or tempfile.mkdtemp(prefix="argus-gazebo-"))
     work.mkdir(parents=True, exist_ok=True)
     out = GazeboEpisode(workdir=str(work))
@@ -128,10 +141,19 @@ def run_gazebo_episode(doc: dict, world: World, start, goal, duration_s: float, 
     env["ROS_DOMAIN_ID"] = str(random.randint(100, 200))
     env["ROS_AUTOMATIC_DISCOVERY_RANGE"] = "LOCALHOST"
     env["GZ_PARTITION"] = f"argus-{os.getpid()}"
-    os.environ.update({k: env[k] for k in ("ROS_DOMAIN_ID", "ROS_AUTOMATIC_DISCOVERY_RANGE", "GZ_PARTITION")})
+    # Gazebo's discovery otherwise goes out on the first network interface, and on a Wi-Fi
+    # laptop the bridge never finds the server.
+    env["GZ_IP"] = "127.0.0.1"
+    os.environ.update({k: env[k] for k in ("ROS_DOMAIN_ID", "ROS_AUTOMATIC_DISCOVERY_RANGE", "GZ_PARTITION",
+                                           "GZ_IP")})
 
+    entries = bridge_entries(doc, topics)
+    odom = next((s for s in doc["sensors"] if s["kind"] == "odometry"), None) or next(
+        (s for s in doc["sensors"] if s["kind"] == "wheel_odom"), None)
     rclpy.init()
     watcher = _Watcher()
+    recorder = RosRecorder(entries, doc["control"]["endpoint"], odom["source"]["endpoint"] if odom else "",
+                           lambda: watcher.now)
     bg = _Background()
     server = HubServer(hub, tls=TlsFiles(work / "ca.pem", work / "hub.pem", work / "hub.key"),
                        clock=lambda: watcher.now)
@@ -151,6 +173,10 @@ def run_gazebo_episode(doc: dict, world: World, start, goal, duration_s: float, 
         procs.append(_start(["ros2", "run", "ros_gz_bridge", "parameter_bridge", "--ros-args",
                              "-p", f"config_file:={work / 'bridge.yaml'}", "-p", "use_sim_time:=true"],
                             work / "bridge.log", env))
+        if record_bag:
+            procs.append(_start(["ros2", "bag", "record", "-s", "mcap", "-o", str(work / "log" / "bag"),
+                                 "--use-sim-time", "--topics", *sorted({e[0] for e in entries})],
+                                work / "bag.log", env))
         procs.append(_start([argo_bin, "--config", str(work / "argo.yaml"), "--ros-args",
                              "-p", "use_sim_time:=true"], work / "argo.log", env))
 
@@ -158,6 +184,7 @@ def run_gazebo_episode(doc: dict, world: World, start, goal, duration_s: float, 
         wall_limit = time.monotonic() + 3 * duration_s + 60.0
         goal_set = False
         last = None
+        in_contact = False
         while time.monotonic() < wall_limit:
             time.sleep(0.02)
             if any(p.poll() is not None for p in procs):
@@ -170,7 +197,13 @@ def run_gazebo_episode(doc: dict, world: World, start, goal, duration_s: float, 
             t, x, y, z, yaw = pose
             out.trace.append(pose)
             if judge.collides(world, np.array([x, y, z]), yaw):
+                if not in_contact:
+                    out.collisions.append({"t_s": t, "until_s": t, "pose": [x, y, yaw]})
+                out.collisions[-1]["until_s"] = t
+                in_contact = True
                 out.collided = True
+            else:
+                in_contact = False
             if not goal_set:
                 hub.set_goal(NODE_ID, tuple(goal), tolerance_m, watcher.now)
                 goal_set = True
@@ -191,7 +224,16 @@ def run_gazebo_episode(doc: dict, world: World, start, goal, duration_s: float, 
     finally:
         for p in reversed(procs):
             _stop(p)
+        log_dir = write_run_log(work / "log", work, doc=doc, world=world, model=model, topics=topics,
+                                start=start, goal=goal, tolerance_m=tolerance_m, episode=out, recorder=recorder)
         bg.run(server.stop())
         bg.close()
+        recorder.close()
         watcher.close()
         rclpy.shutdown()
+        out.log_dir = str(log_dir)
+        if log_store is not None:
+            out.run_id = log_store.add(log_dir, keep=keep_log)
+            out.log_dir = str(log_store.path(out.run_id))
+            if workdir is None:
+                shutil.rmtree(work, ignore_errors=True)

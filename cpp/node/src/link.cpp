@@ -35,11 +35,22 @@ void LinkMonitor::on_heartbeat(uint64_t echo_seq, double now) {
   if (!started_) {
     return;
   }
+  // The first echo after the link was lost: heartbeats sent before this one went out during
+  // the outage, which the Lost state already accounted for. Counting them as loss would keep
+  // the link degraded for a whole loss window after it came back.
+  const bool back_from_outage = now - last_heard_ > config_.lost_after_s;
   last_heard_ = now;
   for (Sent& s : sent_) {
     if (s.seq == echo_seq && !s.echoed) {
       s.echoed = true;
       rtt_s_ = now - s.at;
+      if (back_from_outage) {
+        const double sent_at = s.at;
+        sent_.erase(std::remove_if(sent_.begin(), sent_.end(),
+                                   [&](const Sent& o) { return !o.echoed && o.at < sent_at; }),
+                    sent_.end());
+      }
+      break;
     }
   }
 }

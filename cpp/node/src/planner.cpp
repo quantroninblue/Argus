@@ -10,6 +10,19 @@ using capabilities::MotionSpace;
 namespace {
 
 constexpr double kComfortMargin = 0.3;
+// Kinematic paths are planned with a turn radius this much wider than the profile's, so the
+// tracker has steering left to correct errors: real turns come out wider than declared.
+constexpr double kTurnRadiusMargin = 1.2;
+// A held kinematic path is searched again once the body is this far from it, and at least
+// this often (Nav2 replans at 1 Hz by default), so a body that turns wider than the plan
+// gets a new path from where it really is.
+constexpr double kHoldDistance = 0.2;
+constexpr double kHoldPeriod = 1.0;
+// Kinematic paths are tracked with a lookahead proportional to speed (Adaptive Pure Pursuit;
+// Macenski et al. 2023 use 1 s, 0.25 to 1.2 m): a long fixed one cuts corners into walls.
+constexpr double kLookaheadTime = 1.0;
+constexpr double kMinLookahead = 0.4;
+constexpr double kMaxLookahead = 1.0;
 
 // Centre of the longest run of covered bearings, treating the bins as a circle, preferring the
 // run that contains forward among equally long ones. 0 (forward) when nothing or everything is
@@ -86,12 +99,14 @@ LocalPlanner::LocalPlanner(const capabilities::Capabilities& caps, const BodyVol
     const auto* b = ring[static_cast<int>(std::lround(deg / (360.0 / n))) % n];
     return b->full_height_reach_m > 0.0;
   };
+  use_hybrid_ = m.space == MotionSpace::Planar && !m.can_strafe && m.min_turn_radius_m > 0.0;
   if (m.space == MotionSpace::Planar && !m.can_strafe) {
     const bool reverse = m.can_reverse && m.x.min_mps < 0.0;
     travel_bearing_ = !covered_at(0.0) && reverse && covered_at(M_PI) ? M_PI : 0.0;
   } else {
     travel_bearing_ = widest_covered_bearing(ring);
   }
+  active_bearing_ = travel_bearing_;
 }
 
 double LocalPlanner::body_clearance(const Pose4& pose) const {
@@ -105,7 +120,8 @@ double LocalPlanner::body_clearance(const Pose4& pose) const {
   return best;
 }
 
-void LocalPlanner::replan(const LocalMap& map, const Pose4& pose, const Vec3& goal) {
+void LocalPlanner::replan(const LocalMap& map, const Pose4& pose, const Vec3& goal, const Waypoint* following,
+                          double reverse_limit_m, double now) {
   ws_.build(map, body_, pose);
   PathRequest req;
   req.start = pose.position;
@@ -120,33 +136,127 @@ void LocalPlanner::replan(const LocalMap& map, const Pose4& pose, const Vec3& go
   }
   const PathResult result = search_.find(ws_, req);
   path_ = result.points;
+  path_reverse_.assign(path_.size(), 0);
+  hybrid_path_ = false;
+  if (use_hybrid_ && result.reached && path_.size() >= 2) {
+    HybridRequest hr;
+    hr.start = pose.position;
+    hr.start_yaw = pose.yaw;
+    hr.goal = path_.back();
+    hr.goal_tolerance_m = 1.5 * ws_.resolution();
+    // Arrive lined up with the leg after this waypoint (route-aligned end states, as lattice
+    // planners for cars do), unless the goal was clipped to the window.
+    if (following != nullptr && (path_.back() - goal).head<2>().norm() < 2.0 * ws_.resolution()) {
+      const Vec3 leg = following->position - goal;
+      if (leg.head<2>().norm() > 0.3) {
+        hr.goal_heading_set = true;
+        hr.goal_yaw = std::atan2(leg.y(), leg.x());
+      }
+    }
+    hr.turn_radius_m = kTurnRadiusMargin * caps_.motion.min_turn_radius_m;
+    hr.reverse_limit_m = caps_.motion.can_reverse && caps_.motion.x.min_mps < 0.0 ? reverse_limit_m : 0.0;
+    hr.probes = &probes_;
+    hr.outer_radius_m = body_.radius_m() + ws_.resolution();
+    hr.comfort_clearance_m = req.comfort_clearance_m;
+    hr.unknown_penalty = req.unknown_penalty;
+    if (now - hybrid_planned_at_ >= kHoldPeriod || !hold_hybrid_path(pose, hr)) {
+      hybrid_planned_at_ = now;
+      const HybridResult hy = hybrid_.find(ws_, hr);
+      hybrid_points_ = hy.reached && hy.points.size() >= 2 ? hy.points : std::vector<HybridPathPoint>{};
+    }
+    // Without a kinematic path the grid path still leads the way, as before.
+    if (!hybrid_points_.empty()) {
+      path_.clear();
+      path_reverse_.clear();
+      for (const auto& p : hybrid_points_) {
+        path_.push_back(p.position);
+        path_reverse_.push_back(p.reverse ? 1 : 0);
+      }
+      hybrid_path_ = true;
+    }
+  } else {
+    hybrid_points_.clear();
+  }
   path_reaches_ = result.reached;
   path_exhausted_ = result.exhausted;
   target_blocked_ = result.goal_blocked;
 }
 
-Vec3 LocalPlanner::carrot(const Pose4& pose, const Vec3& goal) const {
-  if (path_.size() < 2) {
-    return goal;
+bool LocalPlanner::hold_hybrid_path(const Pose4& pose, const HybridRequest& request) {
+  auto& pts = hybrid_points_;
+  if (pts.size() < 2 || (pts.back().position - request.goal).head<2>().norm() > 2.0 * ws_.resolution()) {
+    return false;
+  }
+  if (request.goal_heading_set &&
+      std::abs(wrap_angle(pts.back().yaw - request.goal_yaw)) > request.goal_heading_tolerance) {
+    return false;
+  }
+  // Nearest point on the stretch being driven (up to the first change of direction).
+  size_t end = pts.size();
+  for (size_t i = 2; i < pts.size(); ++i) {
+    if (pts[i].reverse != pts[1].reverse) {
+      end = i;
+      break;
+    }
   }
   size_t nearest = 0;
   double best = std::numeric_limits<double>::infinity();
-  for (size_t i = 0; i < path_.size(); ++i) {
+  for (size_t i = 0; i < end; ++i) {
+    const double d = (pts[i].position - pose.position).head<2>().norm();
+    if (d < best) {
+      best = d;
+      nearest = i;
+    }
+  }
+  if (best > kHoldDistance) {
+    return false;
+  }
+  // At the end of a stretch with another after it, the next one starts here.
+  if (end < pts.size() && nearest + 1 >= end && best < 2.0 * ws_.resolution()) {
+    nearest = end - 1;
+  }
+  pts.erase(pts.begin(), pts.begin() + static_cast<long>(nearest));
+  if (pts.size() < 2) {
+    return false;
+  }
+  pts.front().position = pose.position;
+  pts.front().yaw = pose.yaw;
+  return hybrid_.path_free(ws_, request, std::vector<HybridPathPoint>(pts.begin() + 1, pts.end()));
+}
+
+Vec3 LocalPlanner::carrot(const Pose4& pose, const Vec3& goal, double speed) const {
+  if (path_.size() < 2) {
+    return goal;
+  }
+  // A path that changes direction is followed up to the first change; the next replan, from
+  // there, starts with the next stretch.
+  size_t end = path_.size();
+  for (size_t i = 2; i < path_.size(); ++i) {
+    if (path_reverse_[i] != path_reverse_[1]) {
+      end = i;
+      break;
+    }
+  }
+  size_t nearest = 0;
+  double best = std::numeric_limits<double>::infinity();
+  for (size_t i = 0; i < end; ++i) {
     const double d = (path_[i] - pose.position).norm();
     if (d < best) {
       best = d;
       nearest = i;
     }
   }
+  const double lookahead =
+      hybrid_path_ ? std::clamp(kLookaheadTime * speed, kMinLookahead, kMaxLookahead) : lookahead_m_;
   double travelled = 0.0;
-  for (size_t i = nearest; i + 1 < path_.size(); ++i) {
+  for (size_t i = nearest; i + 1 < end; ++i) {
     const double seg = (path_[i + 1] - path_[i]).norm();
-    if (travelled + seg >= lookahead_m_) {
-      return path_[i] + (path_[i + 1] - path_[i]) * ((lookahead_m_ - travelled) / seg);
+    if (travelled + seg >= lookahead) {
+      return path_[i] + (path_[i + 1] - path_[i]) * ((lookahead - travelled) / seg);
     }
     travelled += seg;
   }
-  return path_.back();
+  return path_[end - 1];
 }
 
 std::vector<Twist> LocalPlanner::candidates(const Odometry& odom, const Vec3& carrot, double cap) const {
@@ -159,7 +269,7 @@ std::vector<Twist> LocalPlanner::candidates(const Odometry& odom, const Vec3& ca
     for (double f : {1.0, 0.7, 0.45, 0.25, 0.1}) xs.push_back(f * m.x.max_mps);
     // Reversing is offered slowly, unless the body travels backwards.
     if (m.can_reverse && m.x.min_mps < 0.0) {
-      if (std::cos(travel_bearing_) < 0.0) {
+      if (std::cos(active_bearing_) < 0.0) {
         for (double f : {1.0, 0.7, 0.45, 0.25, 0.1}) xs.push_back(f * m.x.min_mps);
       } else {
         for (double f : {0.3, 0.15}) xs.push_back(f * m.x.min_mps);
@@ -182,6 +292,22 @@ std::vector<Twist> LocalPlanner::candidates(const Odometry& odom, const Vec3& ca
         }
       }
     }
+    // On a kinematic path, the pure pursuit arc to the carrot (curvature 2y/L^2 in the base
+    // frame; Coulter 1992, Macenski et al. 2023), so the path can be followed exactly.
+    if (hybrid_path_) {
+      const Vec3 local = Pose4{Vec3::Zero(), -odom.pose.yaw}.rotate(carrot - odom.pose.position);
+      const double l2 = local.head<2>().squaredNorm();
+      if (l2 > 1e-4) {
+        const double k = std::clamp(2.0 * local.y() / l2, -1.0 / m.min_turn_radius_m, 1.0 / m.min_turn_radius_m);
+        for (double vx : xs) {
+          if (vx == 0.0 || (vx < 0.0) != reversing_stretch_) continue;
+          Twist t;
+          t.linear = Vec3(vx, 0.0, 0.0);
+          t.yaw_rate = vx * k;
+          out.push_back(motion_.clamp(cap_speed(t, cap)));
+        }
+      }
+    }
     return out;
   }
 
@@ -193,7 +319,7 @@ std::vector<Twist> LocalPlanner::candidates(const Odometry& odom, const Vec3& ca
   const double heading_to = std::atan2(to.y(), to.x());
   // Turn so the body's best-covered side, not necessarily its nose, faces `heading`.
   auto yaw_rate_toward = [&](double heading) {
-    return std::clamp(2.0 * wrap_angle(heading - travel_bearing_ - pose.yaw), -m.yaw_rate_max_radps,
+    return std::clamp(2.0 * wrap_angle(heading - active_bearing_ - pose.yaw), -m.yaw_rate_max_radps,
                       m.yaw_rate_max_radps);
   };
   for (double w : {yaw_rate_toward(heading_to), 0.0}) {
@@ -271,7 +397,7 @@ bool LocalPlanner::evaluate(const Twist& target, const Odometry& odom, const Vec
   // its best value along the rollout, for the same reason as the distance.
   const Vec3 from_start = carrot - odom.pose.position;
   const bool judge_heading = from_start.head<2>().norm() > 0.2;
-  const double wanted_yaw = std::atan2(from_start.y(), from_start.x()) - travel_bearing_;
+  const double wanted_yaw = std::atan2(from_start.y(), from_start.x()) - active_bearing_;
   auto heading_error = [&](const Pose4& p) { return std::abs(wrap_angle(wanted_yaw - p.yaw)); };
   double heading = heading_error(pose);
   for (int i = 0; i < steps; ++i) {
@@ -301,7 +427,10 @@ bool LocalPlanner::evaluate(const Twist& target, const Odometry& odom, const Vec
   const double comfort = std::clamp(body_clearance(Pose4{carrot, odom.pose.yaw}), 0.0, kComfortMargin);
   cost += 0.5 * std::max(0.0, comfort - min_clear) / kComfortMargin;
   cost += 0.3 * unknown / static_cast<double>(steps);
-  if (target.linear.x() < 0.0 && m.space == MotionSpace::Planar && travel_bearing_ == 0.0) {
+  if (target.linear.x() < 0.0 && m.space == MotionSpace::Planar && active_bearing_ == 0.0) {
+    cost += 0.3;
+  }
+  if (reversing_stretch_ && target.linear.x() > 0.0) {
     cost += 0.3;
   }
   out.velocity = target;
@@ -310,7 +439,7 @@ bool LocalPlanner::evaluate(const Twist& target, const Odometry& odom, const Vec
 }
 
 Proposal LocalPlanner::plan(const LocalMap& map, const Waypoint& target,
-                            const SafetySupervisor& supervisor, const SafetyInputs& in) {
+                            const SafetySupervisor& supervisor, const SafetyInputs& in, const Waypoint* following) {
   Proposal proposal;
   proposal.inputs_stamp = in.odom.stamp;
   proposal.has_target = true;
@@ -318,7 +447,18 @@ Proposal LocalPlanner::plan(const LocalMap& map, const Waypoint& target,
 
   const bool goal_moved = !((target.position - last_goal_).norm() < 1e-6);
   if (goal_moved || in.now - last_replan_ >= config_.replan_period_s) {
-    replan(map, pose, target.position);
+    // Reversing on a kinematic path: free where the body sees behind, the creep left where it
+    // does not, none where the supervisor would refuse it.
+    double reverse_limit = 0.0;
+    if (use_hybrid_) {
+      const Coverage c = supervisor.coverage(-Vec3::UnitX(), in);
+      if (c == Coverage::Covered) {
+        reverse_limit = std::numeric_limits<double>::infinity();
+      } else if (c == Coverage::Uncovered && supervisor.creep_available()) {
+        reverse_limit = supervisor.creep_left_m();
+      }
+    }
+    replan(map, pose, target.position, following, reverse_limit, in.now);
     last_replan_ = in.now;
     last_goal_ = target.position;
   }
@@ -326,7 +466,9 @@ Proposal LocalPlanner::plan(const LocalMap& map, const Waypoint& target,
   proposal.path_exhausted = path_exhausted_;
   proposal.target_blocked = target_blocked_;
 
-  const Vec3 aim = carrot(pose, target.position);
+  reversing_stretch_ = path_.size() >= 2 && path_reverse_[1] != 0;
+  active_bearing_ = reversing_stretch_ ? M_PI : (hybrid_path_ ? 0.0 : travel_bearing_);
+  const Vec3 aim = carrot(pose, target.position, in.odom.twist.linear.norm());
   // Within a cell of an obstacle the distance field cannot tell a move that touches it from
   // one that backs away, so rollouts there are judged by the supervisor's own contact test.
   const double threshold = 0.75 * ws_.resolution();

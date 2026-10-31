@@ -39,9 +39,10 @@ def world_sdf(world: World, models: list[str], step_s: float = 0.001) -> str:
             + floor + "".join(boxes) + "".join(models) + "</world></sdf>")
 
 
-def bridge_yaml(doc: dict, topics: Topics) -> str:
-    """ros_gz parameter_bridge config: sensors and wheel odometry to the profile's ROS 2 topics,
-    the command from ROS 2, simulated time, and the true pose on a topic Argo does not read."""
+def bridge_entries(doc: dict, topics: Topics) -> list[tuple[str, str, str, str, str]]:
+    """(ROS 2 topic, Gazebo topic, ROS 2 type, Gazebo type, direction) for everything bridged:
+    sensors and wheel odometry to the profile's ROS 2 topics, the command from ROS 2, simulated
+    time, and the true pose on a topic Argo does not read."""
     entries = [("/clock", "/clock", "rosgraph_msgs/msg/Clock", "gz.msgs.Clock", "GZ_TO_ROS")]
     sensors = {s["id"]: s for s in doc.get("sensors", [])}
     for sid, gz in topics.sensors.items():
@@ -64,8 +65,13 @@ def bridge_yaml(doc: dict, topics: Topics) -> str:
     entries.append(("/argus_truth", topics.truth, "nav_msgs/msg/Odometry", "gz.msgs.Odometry", "GZ_TO_ROS"))
     entries.append((doc["control"]["endpoint"], topics.cmd_vel, "geometry_msgs/msg/Twist", "gz.msgs.Twist",
                     "ROS_TO_GZ"))
+    return entries
+
+
+def bridge_yaml(doc: dict, topics: Topics) -> str:
+    """ros_gz parameter_bridge config for `bridge_entries`."""
     lines = []
-    for ros, gz, ros_type, gz_type, direction in entries:
+    for ros, gz, ros_type, gz_type, direction in bridge_entries(doc, topics):
         lines += [f'- ros_topic_name: "{ros}"', f'  gz_topic_name: "{gz}"', f'  ros_type_name: "{ros_type}"',
                   f'  gz_type_name: "{gz_type}"', f"  direction: {direction}"]
     return "\n".join(lines) + "\n"

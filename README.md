@@ -88,6 +88,10 @@ tools/check.sh
 `tools/check.sh` builds everything into `build/` and runs the C++ and Python tests (a few
 minutes; some tests run over a real local network link in wall time).
 
+With ROS 2 Jazzy installed (desktop, with `ros-jazzy-ros-gz` for Gazebo Harmonic), the build
+also includes Argo's ROS 2 driver, and `tools/check.sh --gazebo` additionally drives robots
+through Gazebo.
+
 ## Trying the capability library
 
 After building:
@@ -105,6 +109,25 @@ EOF
 
 To write a profile for your own robot, start from one of the files in `schemas/examples/`.
 Validation reports every problem with the path of the field at fault.
+
+## Describing your robot
+
+A profile can be built from the robot's URDF (or xacro) plus a short answers file with what a
+URDF cannot say: speed and braking limits, the command topic, the controller timeout, the
+failsafe and odometry. Collision shapes, link frames and any sensors declared in Gazebo tags
+come from the URDF; meshes become bounding boxes.
+
+```sh
+export PYTHONPATH=python:build/python
+python3 -m argus setup template > answers.yaml   # then fill it in
+python3 -m argus setup import robot.urdf -a answers.yaml -o profile.yaml
+python3 -m argus setup report profile.yaml
+```
+
+Import lists anything missing instead of guessing it, and prints a capability report: stopping
+distances, the bearings and heights the sensors cover, and which values are still declared
+rather than measured. `package://` mesh paths resolve through a sourced ROS 2 environment or
+`--package NAME=DIRECTORY`.
 
 ## Driving a simulated robot
 
@@ -141,6 +164,48 @@ print("reached" if ep.goal_reached else "did not reach", "the goal at", ep.reach
 print("failsafe:", [(round(e["stamp"], 1), e["kind"]) for e in ep.failsafe_events()])
 EOF
 ```
+
+## Running a robot in Gazebo
+
+Needs ROS 2 Jazzy with Gazebo Harmonic. The body profile is turned into a Gazebo model with
+wheels driven through real joints (differential, mecanum or front-steered, picked from the
+profile's motion), the world into SDF, and the real Argo binary drives it through its ROS 2
+driver while a local hub plans over mutual TLS.
+
+```sh
+source /opt/ros/jazzy/setup.bash
+export PYTHONPATH=python:build/python:$PYTHONPATH
+python3 - <<'EOF'
+from argus import profile
+from argus.sim import world
+from argus.gazebo.run import run_gazebo_episode
+
+doc = profile.load("schemas/examples/planar_differential.yaml")
+ep = run_gazebo_episode(doc, world.wall_with_gap(), (0.0, 0.0, 0.0, 0.0), (5.0, 2.0, 0.0), 90.0,
+                        gui=True)
+print(ep.mission_state, "collided:", ep.collided)
+print("run log:", ep.log_dir)
+EOF
+```
+
+Each run writes a log: the world and model SDF, the profile, the true trajectory, every
+command Argo sent, the robot's own odometry, a summary of every ROS 2 topic (rate, stamp lag,
+gaps) and Argo's events. Pass `record_bag=True` to also record every topic to an mcap bag.
+
+## Certificates
+
+The hub and every robot authenticate each other with certificates from your own authority.
+A robot's certificate name must match its Argo `node_id`.
+
+```sh
+export PYTHONPATH=python
+python3 -m argus certs ca pki
+python3 -m argus certs hub pki --host hub.example.lan --host 192.168.1.20
+python3 -m argus certs robot pki robot-1
+```
+
+Keep `pki/ca.key` off the robots; each robot needs only `ca.pem` and its own certificate and
+key.
 
 ## License
 

@@ -64,4 +64,8 @@ const Waypoint* Mission::target() const {
   return active_ ? &plan_.waypoints[next_] : nullptr;
 }
 
+const Waypoint* Mission::after_target() const {
+  return active_ && next_ + 1 < plan_.waypoints.size() ? &plan_.waypoints[next_ + 1] : nullptr;
+}
+
 }  // namespace argus::node

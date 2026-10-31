@@ -7,6 +7,7 @@ add_library(argus_node
   src/workspace.cpp
   src/mission.cpp
   src/safety.cpp
+  src/hybrid_search.cpp
   src/planner.cpp
   src/adapter.cpp
   src/link.cpp
@@ -32,7 +33,8 @@ if(ARGUS_BUILD_TESTS)
     tests/test_motion.cpp
     tests/test_safety.cpp
     tests/test_node.cpp
-    tests/test_link.cpp)
+    tests/test_link.cpp
+    tests/test_hybrid_search.cpp)
   target_link_libraries(argus_node_tests PRIVATE argus_node_session GTest::gtest_main)
   target_compile_definitions(argus_node_tests
     PRIVATE ARGUS_EXAMPLES_DIR="${PROJECT_SOURCE_DIR}/schemas/examples")

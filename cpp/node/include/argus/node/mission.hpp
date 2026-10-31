@@ -27,6 +27,8 @@ class Mission {
 
   // Waypoint being driven to, or nullptr when idle.
   const Waypoint* target() const;
+  // The waypoint after the target, or nullptr.
+  const Waypoint* after_target() const;
   uint64_t generation() const { return generation_; }
 
  private:

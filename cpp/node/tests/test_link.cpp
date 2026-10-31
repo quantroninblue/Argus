@@ -78,3 +78,21 @@ TEST(Link, SilenceLosesTheLinkOnlyAfterTheProfileTimeout) {
   exchange(m, seq, 10.6, 11.6, 0.01);
   EXPECT_EQ(m.state(), LinkState::Connected);
 }
+
+TEST(Link, ConnectedSoonAfterALongOutageEnds) {
+  LinkMonitor m(config());
+  m.on_session_start(0.0);
+  uint64_t seq = 0;
+  exchange(m, seq, 0.0, 2.0, 0.01);
+  ASSERT_EQ(m.state(), LinkState::Connected);
+  // Five seconds of heartbeats with no echo.
+  for (double t = 2.0; t < 7.0 - 1e-9; t += 0.2) {
+    m.on_sent(++seq, t);
+    m.update(t);
+  }
+  ASSERT_EQ(m.state(), LinkState::Lost);
+  // Back: Connected after the recovery time, not after the loss window has cleared.
+  exchange(m, seq, 7.0, 8.4, 0.01);
+  EXPECT_EQ(m.state(), LinkState::Connected);
+  EXPECT_LT(m.loss_fraction(), 0.05);
+}
