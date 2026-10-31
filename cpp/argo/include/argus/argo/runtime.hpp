@@ -53,6 +53,10 @@ struct RuntimeConfig {
   node::GrpcLinkConfig link;
   // On shutdown, stop commands keep going out for this long.
   double stop_repeat_s = 0.5;
+  // Setup mode: no hub; Argo drives only velocities requested through request_velocity(),
+  // each checked by the supervisor, and sends nothing at all between requests, so the robot's
+  // own controller timeout can be tested.
+  bool setup_mode = false;
 };
 
 struct TickStats {
@@ -79,10 +83,15 @@ class Runtime {
   // Safe from any thread and from a signal handler.
   void stop() { stop_ = true; }
 
+  // Setup mode: drive `velocity` for the next `for_s` seconds. Safe from any thread.
+  void request_velocity(const node::Twist& velocity, double for_s);
+
   // One control tick at `now`. run() calls this; tests can too.
   node::TickResult step(double now);
 
   const TickStats& stats() const { return stats_; }
+  // Safety flags of the latest tick. Safe from any thread.
+  uint32_t flags() const { return last_flags_; }
   node::Node& core() { return *node_; }
   node::Session& session() { return *session_; }
   double period_s() const { return node_->control_period_s(); }
@@ -104,8 +113,12 @@ class Runtime {
   std::unique_ptr<node::GrpcLink> link_;
   Inbox inbox_;
   std::atomic<bool> stop_{false};
+  std::mutex request_mutex_;
+  bool request_pending_ = false;
+  node::Twist request_;
+  double request_for_s_ = 0.0;
   TickStats stats_;
-  uint32_t last_flags_ = 0;
+  std::atomic<uint32_t> last_flags_{0};
   std::vector<Odometry> odom_buffer_;
   std::vector<RangeFrame> frame_buffer_;
 };

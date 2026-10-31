@@ -21,6 +21,7 @@ from geometry_msgs.msg import Twist
 from rclpy.executors import SingleThreadedExecutor
 from rclpy.parameter import Parameter
 
+from argus import profile as profiles
 from argus.sim.world import World
 
 from .model import Topics, model_sdf
@@ -138,3 +139,13 @@ def start_robot(doc: dict, world: World, start, work: Path, env: dict, gui: bool
                                      work / "bridge.log", env))
     robot.controller = MotorController(doc, timeout=controller_timeout)
     return robot
+
+
+def start_argo_setup(doc: dict, work: Path, env: dict, argo_bin: str) -> subprocess.Popen:
+    """Argo in setup mode beside a simulated robot: no hub, motion only on setup requests."""
+    (work / "setup_profile.yaml").write_text(profiles.dump(doc))
+    (work / "argo_setup.yaml").write_text(f"node_id: setup\nprofile: setup_profile.yaml\n"
+                                          f"profile_hash: {profiles.profile_hash(doc)}\n")
+    return start_process([argo_bin, "--config", str(work / "argo_setup.yaml"), "--setup", "--ros-args",
+                          "-p", "use_sim_time:=true"], work / "argo_setup.log", env)
+

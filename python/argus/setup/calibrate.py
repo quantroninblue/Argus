@@ -9,7 +9,9 @@ and measured for speeds, acceleration, braking and yaw rate; the higher for late
 radius. A measurement that confirms the declared value marks it verified. What the data does
 not determine keeps its declared value.
 
-Every straight run first checks the forward scan for the distance it needs.
+Every straight run first checks the forward scan for the distance it needs. Motion goes
+through Argo in setup mode unless `direct` (see live.py); a top speed Argo's supervisor slowed
+is not written back, since it measures the supervisor, not the robot.
 """
 
 from __future__ import annotations
@@ -23,7 +25,7 @@ from dataclasses import dataclass, field
 from rclpy.qos import qos_profile_sensor_data
 from rosidl_runtime_py.utilities import get_message
 
-from .live import _clear_ahead, _Probe, _wait
+from .live import ARGO_SETUP_TOPIC, _clear_ahead, _Probe, _wait
 
 MARGIN_M = 0.5
 
@@ -114,7 +116,7 @@ def _straight_run(probe, pub, twist, period, odom, speed, accel, decel):
     return latency, a, steady, b
 
 
-def calibrate(doc: dict, sim_time: bool = False) -> Calibration:
+def calibrate(doc: dict, sim_time: bool = False, direct: bool = False) -> Calibration:
     """Needs rclpy initialised and clear space ahead of the robot."""
     out = Calibration(profile=copy.deepcopy(doc))
     new = out.profile
@@ -132,11 +134,16 @@ def calibrate(doc: dict, sim_time: bool = False) -> Calibration:
     prov = new.setdefault("provenance", {})
 
     probe = _Probe(sim_time)
+    probe.watch_flags()
     twist = get_message("geometry_msgs/msg/Twist")
-    pub = probe.node.create_publisher(twist, control["endpoint"], 10)
+    pub = probe.node.create_publisher(twist, probe.command_topic(new, direct), 10)
     period = 1.0 / control["rate_hz"]
     try:
         time.sleep(1.5)  # discovery
+        if not direct and probe.node.count_subscribers(ARGO_SETUP_TOPIC) == 0:
+            out.problems.append("Argo is not in setup mode; start 'argo --config argo.yaml --setup' on the "
+                                "robot (or pass --direct)")
+            return out
         odom = _Odom(probe, odom_spec["source"]["endpoint"])
         stats = {s["source"]["endpoint"]: {"spec": s} for s in new["sensors"] if s["kind"] == "range_2d"}
         runs = []
@@ -148,7 +155,13 @@ def calibrate(doc: dict, sim_time: bool = False) -> Calibration:
                 out.problems.append(f"straight run at {v:.2f} m/s needs {need:.1f} m clear ahead, "
                                     + ("no 2D scan to check" if clear is None else f"have {clear:.1f} m"))
                 break
+            started = probe.now()
             r = _straight_run(probe, pub, twist, period, odom, v, accel, decel)
+            slowed = probe.flags_since(started) & {"slowed", "creep", "blocked", "uncovered", "short_sight"}
+            if slowed and not direct:
+                out.problems.append(f"straight run at {v:.2f} m/s: Argo's supervisor limited it "
+                                    f"({' '.join(sorted(slowed))}); calibrate somewhere more open")
+                break
             if r is None:
                 out.problems.append(f"straight run at {v:.2f} m/s: the robot did not reach a steady speed")
                 break

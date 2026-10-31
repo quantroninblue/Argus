@@ -92,6 +92,14 @@
         "accelerator": {"enum": ["none", "rk3588_npu", "hailo", "cuda"]}
       }
     },
+    "assumptions": {
+      "description": "Declared facts about where the robot works. min_obstacle_height_m: obstacles stand on the ground and are at least this tall, so seeing any height up to it counts as seeing the column below it.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "min_obstacle_height_m": {"type": "number", "minimum": 0}
+      }
+    },
     "provenance": {
       "type": "object",
       "additionalProperties": {"enum": ["declared", "cad", "calibrated", "llm_draft", "llm_draft_reviewed"]}

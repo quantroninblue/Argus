@@ -576,7 +576,7 @@ Profile parse(const YAML::Node& root) {
   }
   r.only_keys(root, "",
               {"argus_profile", "id", "name", "description_file", "geometry", "motion", "control",
-               "failsafe", "sensors", "compute", "provenance"});
+               "failsafe", "sensors", "compute", "assumptions", "provenance"});
   if (auto version = r.number(root, "argus_profile", "", true)) {
     if (*version != kProfileFormatVersion) {
       r.fail("argus_profile", "unsupported format version, expected " +
@@ -601,6 +601,14 @@ Profile parse(const YAML::Node& root) {
     p.compute.board = r.text(n, "board", "compute", true).value_or("");
     p.compute.accelerator =
         r.choice(n, "accelerator", "compute", kAccelerators, true).value_or(Accelerator::None);
+  }
+
+  if (auto n = r.child(root, "assumptions", "", false); n && r.expect_map(n, "assumptions")) {
+    r.only_keys(n, "assumptions", {"min_obstacle_height_m"});
+    p.assumed_min_obstacle_height_m = r.number(n, "min_obstacle_height_m", "assumptions", false);
+    if (p.assumed_min_obstacle_height_m && *p.assumed_min_obstacle_height_m < 0.0) {
+      r.fail("assumptions.min_obstacle_height_m", "must not be negative");
+    }
   }
 
   if (auto n = r.child(root, "provenance", "", false); n && r.expect_map(n, "provenance")) {

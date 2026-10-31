@@ -125,6 +125,10 @@ struct Capabilities {
   ComputeCapability compute;
   ControlSpec control;
   FailsafeSpec failsafe;
+  // Obstacles shorter than this are treated as ground.
+  double min_obstacle_height_m = 0.05;
+  // The profile's declared minimum obstacle height (profile.hpp), 0 when none.
+  double assumed_obstacle_height_m = 0.0;
   // False while any field is still an unreviewed LLM draft.
   bool safety_ready = true;
   std::vector<std::string> unreviewed_fields;

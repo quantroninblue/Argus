@@ -104,7 +104,7 @@ def build_profile(urdf: str | Path, answers: dict, base_frame: str | None = None
         "frames": {identifier(name): frame_pose(t) for name, t in sorted(body.frames.items())},
     }
     provenance = {"geometry.shapes": "cad"}
-    for section in ("motion", "control", "failsafe"):
+    for section in ("motion", "control", "failsafe", "assumptions"):
         if section in answers:
             provenance[section] = "declared"
 

@@ -453,7 +453,13 @@ TickResult Node::tick(double now) {
     retracing_ = false;
   }
 
-  if (!target) {
+  if (velocity_requested(now)) {
+    // A setup motion test: the requested velocity instead of the planner's, checked below by
+    // the supervisor like any other.
+    proposal_ = Proposal{};
+    proposal_.inputs_stamp = now;
+    proposal_.velocity = requested_;
+  } else if (!target) {
     proposal_ = Proposal{};
     proposal_.inputs_stamp = now;
   } else if (now - last_plan_time_ >= config_.planner.period_s - 1e-9 || !proposal_.has_target) {

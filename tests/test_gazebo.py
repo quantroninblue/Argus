@@ -90,7 +90,7 @@ def test_run_log_holds_the_whole_run_and_no_keys(tmp_path):
 def test_setup_check_passes_on_a_simulated_robot_and_catches_a_missing_timeout(tmp_path):
     import rclpy
 
-    from argus.gazebo.robot import isolated_env, start_robot
+    from argus.gazebo.robot import isolated_env, start_argo_setup, start_robot, stop_process
     from argus.setup.live import live_check
 
     doc = _example("planar_differential")
@@ -101,9 +101,11 @@ def test_setup_check_passes_on_a_simulated_robot_and_catches_a_missing_timeout(t
         env = isolated_env()
         rclpy.init()
         robot = start_robot(doc, worlds.open_room(), (0.0, 0.0, 0.0, 0.0), work, env, controller_timeout=timeout)
+        argo = start_argo_setup(doc, work, env, str(ARGO))
         try:
             results[timeout] = live_check(doc, duration_s=3.0, motion=True, sim_time=True)
         finally:
+            stop_process(argo)
             robot.stop()
             rclpy.shutdown()
     good, bad = results[True], results[False]
@@ -117,15 +119,17 @@ def test_setup_check_passes_on_a_simulated_robot_and_catches_a_missing_timeout(t
 def _calibrate_in_gazebo(true_doc, declared_doc, work):
     import rclpy
 
-    from argus.gazebo.robot import isolated_env, start_robot
+    from argus.gazebo.robot import isolated_env, start_argo_setup, start_robot, stop_process
     from argus.setup.calibrate import calibrate
 
     env = isolated_env()
     rclpy.init()
     robot = start_robot(true_doc, worlds.open_room(), (-5.0, 0.0, 0.0, 0.0), work, env)
+    argo = start_argo_setup(declared_doc, work, env, str(ARGO))
     try:
         return calibrate(declared_doc, sim_time=True)
     finally:
+        stop_process(argo)
         robot.stop()
         rclpy.shutdown()
 
@@ -151,3 +155,30 @@ def test_calibration_catches_optimistic_braking_and_a_wider_turn(tmp_path):
     cal = _calibrate_in_gazebo(car, car, tmp_path / "car")
     assert cal.problems == [], cal.text()
     assert cal.profile["motion"]["min_turn_radius_m"] > 0.85, cal.text()
+
+
+def test_argo_refuses_a_setup_motion_into_a_wall(tmp_path):
+    import rclpy
+
+    from argus.gazebo.robot import isolated_env, start_argo_setup, start_robot, stop_process
+    from argus.setup.live import live_check
+
+    doc = _example("planar_differential")
+    world = worlds.open_room()
+    # The body's front is at 0.30 m and the one second crawl covers 0.10 m, so a wall at 0.38 m
+    # would be touched.
+    world.add((0.38, -1.0, 0.0), (0.58, 1.0, 1.0))
+    env = isolated_env()
+    rclpy.init()
+    robot = start_robot(doc, world, (0.0, 0.0, 0.0, 0.0), tmp_path, env)
+    argo = start_argo_setup(doc, tmp_path, env, str(ARGO))
+    try:
+        # wheels_up skips the tool's own clearance check, so only Argo stands in the way.
+        result = live_check(doc, duration_s=2.0, motion=True, wheels_up=True, sim_time=True)
+    finally:
+        stop_process(argo)
+        robot.stop()
+        rclpy.shutdown()
+    check = next(c for c in result.checks if c.name == "controller timeout")
+    assert not check.ok and "supervisor" in check.detail, result.text()
+

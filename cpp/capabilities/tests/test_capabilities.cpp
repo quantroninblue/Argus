@@ -135,3 +135,25 @@ TEST(Capabilities, LocalizationAndCompute) {
   EXPECT_TRUE(aerial.localization.external_odometry);
   EXPECT_FALSE(aerial.localization.wheel_odometry);
 }
+
+TEST(Capabilities, OneScanPlaneSeesTheWholeBodyHeightOnlyUnderADeclaredObstacleHeight) {
+  // kSelfOccluded: a 360 degree scan plane at 0.25 m on a body from 0.05 to 0.45 m.
+  const Capabilities plain = derive_capabilities(load_profile_text(kSelfOccluded));
+  const CoverageBin& ahead = bin_at(plain.sensing, 0.0);
+  EXPECT_TRUE(ahead.seen());                          // the plane does see something
+  EXPECT_EQ(ahead.full_height_from_m, kNever);         // but not obstacles below or above it
+  EXPECT_FALSE(ahead.unseen_bands.empty());
+
+  auto with_assumption = [](double h) {
+    return derive_capabilities(load_profile_text(std::string(kSelfOccluded) +
+                                                 "assumptions: {min_obstacle_height_m: " + std::to_string(h) + "}\n"));
+  };
+  // Obstacles at least 0.30 m tall: the plane at 0.25 m sees each one, but the body's upper
+  // part (0.30 to 0.45 m) still meets nothing it can see.
+  EXPECT_EQ(bin_at(with_assumption(0.30).sensing, 0.0).full_height_from_m, kNever);
+  // As tall as the body or taller: one plane is enough.
+  const Capabilities tall = with_assumption(0.50);
+  EXPECT_NE(bin_at(tall.sensing, 0.0).full_height_from_m, kNever);
+  EXPECT_DOUBLE_EQ(tall.assumed_obstacle_height_m, 0.50);
+  EXPECT_DOUBLE_EQ(tall.min_obstacle_height_m, 0.05);
+}

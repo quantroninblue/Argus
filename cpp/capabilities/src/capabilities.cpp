@@ -151,17 +151,14 @@ std::vector<HeightBand> height_bands(const Profile& profile, const CollisionCapa
   return bands;
 }
 
-// Heights to test inside one band for one sensor. Sampling the band edges, its middle,
-// the sensor's own height and its optical axis height catches thin scan planes.
-std::vector<double> band_probe_heights(const RangeSensor& sensor, const HeightBand& band,
-                                       double ground, const Vec2& xy) {
-  auto clamp = [&](double z) { return std::clamp(z, ground + band.low_m, ground + band.high_m); };
-  std::vector<double> z = {ground + band.low_m, ground + 0.5 * (band.low_m + band.high_m),
-                           ground + band.high_m, clamp(sensor.origin.z())};
-  const double horizontal = sensor.forward.head<2>().norm();
-  if (horizontal > 1e-6) {
-    const double distance = (xy - sensor.origin.head<2>()).norm();
-    z.push_back(clamp(sensor.origin.z() + distance * sensor.forward.z() / horizontal));
+// Heights across one band, no more than 2 cm apart. A band counts as seen at a distance only
+// when the sensors see all of them there: a single scan plane crossing the band does not see
+// an obstacle below it.
+std::vector<double> band_heights(const HeightBand& band, double ground) {
+  const int n = std::max(2, static_cast<int>(std::ceil((band.high_m - band.low_m) / 0.02)) + 1);
+  std::vector<double> z;
+  for (int i = 0; i < n; ++i) {
+    z.push_back(ground + band.low_m + (band.high_m - band.low_m) * i / (n - 1));
   }
   return z;
 }
@@ -175,6 +172,10 @@ SensingCapability derive_planar_sensing(const Profile& profile,
   sensing.sample_step_m = options.sample_step_m;
   sensing.bands = height_bands(profile, collision, options);
   const double ground = profile.geometry.ground_z_m.value_or(0.0);
+  const double low = options.min_obstacle_height_m;
+  // Top of the column a declared obstacle height covers, capped at the body's own top.
+  const double assumed_top =
+      ground + std::min(profile.assumed_min_obstacle_height_m.value_or(0.0), collision.aabb_max.z() - ground);
   const int samples = static_cast<int>(std::floor(options.evaluation_range_m / options.sample_step_m));
 
   for (double az = 0.0; az < 360.0 - 1e-9; az += options.azimuth_step_deg) {
@@ -182,27 +183,50 @@ SensingCapability derive_planar_sensing(const Profile& profile,
     bin.azimuth_deg = az;
     const Vec2 dir(std::cos(az * kDeg), std::sin(az * kDeg));
     bin.edge_distance_m = collision.edge_distance_m(az * kDeg);
-    std::vector<double> first(sensing.bands.size(), kNever);
-    std::vector<double> last(sensing.bands.size(), 0.0);
+    // Per band: where some height in it is seen (a scan plane crossing it), and where every
+    // height in it is seen. Only the second makes a band count toward full-height coverage.
+    const size_t nb = sensing.bands.size();
+    std::vector<double> any_first(nb, kNever), any_last(nb, 0.0), all_first(nb, kNever), all_last(nb, 0.0);
     std::set<std::string> contributing;
 
     for (int i = 0; i <= samples; ++i) {
       const double s = i * options.sample_step_m;
       const Vec2 xy = (bin.edge_distance_m + s) * dir;
-      for (size_t b = 0; b < sensing.bands.size(); ++b) {
+      auto seen_at = [&](double z) {
         for (const RangeSensor& sensor : sensors) {
-          bool seen = false;
-          for (double z : band_probe_heights(sensor, sensing.bands[b], ground, xy)) {
-            if (sensor.sees(Vec3(xy.x(), xy.y(), z))) {
-              seen = true;
-              break;
-            }
-          }
-          if (seen) {
-            first[b] = std::min(first[b], s);
-            last[b] = std::max(last[b], s);
+          if (sensor.sees(Vec3(xy.x(), xy.y(), z))) {
             contributing.insert(sensor.spec->id);
+            return true;
           }
+        }
+        return false;
+      };
+      // With a declared obstacle height, obstacles reach from the ground to at least that
+      // height, so seeing any height up to it sees the whole column below it.
+      bool column = false;
+      if (assumed_top > ground + low) {
+        for (double z : band_heights({low, assumed_top - ground}, ground)) {
+          if (seen_at(z)) {
+            column = true;
+            break;
+          }
+        }
+      }
+      for (size_t b = 0; b < nb; ++b) {
+        bool all = true;
+        bool any = false;
+        for (double z : band_heights(sensing.bands[b], ground)) {
+          const bool seen = seen_at(z) || (column && z <= assumed_top + 1e-9);
+          any = any || seen;
+          all = all && seen;
+        }
+        if (any) {
+          any_first[b] = std::min(any_first[b], s);
+          any_last[b] = std::max(any_last[b], s);
+        }
+        if (all) {
+          all_first[b] = std::min(all_first[b], s);
+          all_last[b] = std::max(all_last[b], s);
         }
       }
     }
@@ -210,16 +234,18 @@ SensingCapability derive_planar_sensing(const Profile& profile,
     bool every_band = true;
     double full_from = 0.0;
     double reach = kNever;
-    for (size_t b = 0; b < sensing.bands.size(); ++b) {
-      if (first[b] == kNever) {
+    for (size_t b = 0; b < nb; ++b) {
+      if (any_first[b] != kNever) {
+        bin.first_seen_m = std::min(bin.first_seen_m, any_first[b]);
+        bin.max_seen_m = std::max(bin.max_seen_m, any_last[b]);
+      }
+      if (all_first[b] == kNever) {
         every_band = false;
         bin.unseen_bands.push_back(sensing.bands[b]);
         continue;
       }
-      bin.first_seen_m = std::min(bin.first_seen_m, first[b]);
-      bin.max_seen_m = std::max(bin.max_seen_m, last[b]);
-      full_from = std::max(full_from, first[b]);
-      reach = std::min(reach, last[b]);
+      full_from = std::max(full_from, all_first[b]);
+      reach = std::min(reach, all_last[b]);
     }
     if (every_band) {
       bin.full_height_from_m = full_from;
@@ -379,6 +405,8 @@ std::vector<std::string> LocalizationCapability::sources() const {
 
 Capabilities derive_capabilities(const Profile& profile, const DeriveOptions& options) {
   Capabilities caps;
+  caps.min_obstacle_height_m = options.min_obstacle_height_m;
+  caps.assumed_obstacle_height_m = profile.assumed_min_obstacle_height_m.value_or(0.0);
   caps.profile_id = profile.id;
   caps.control = profile.control;
   caps.failsafe = profile.failsafe;

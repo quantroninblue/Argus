@@ -4,6 +4,7 @@ find_package(rclcpp REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(nav_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
+find_package(std_msgs REQUIRED)
 
 add_library(argo_convert src/convert.cpp)
 target_include_directories(argo_convert PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
@@ -17,7 +18,7 @@ target_link_libraries(argo_ros PUBLIC argo_convert argo_runtime rclcpp::rclcpp
 target_compile_options(argo_ros PRIVATE -Wall -Wextra)
 
 add_executable(argo src/main.cpp)
-target_link_libraries(argo PRIVATE argo_ros)
+target_link_libraries(argo PRIVATE argo_ros ${std_msgs_TARGETS})
 
 if(ARGUS_BUILD_TESTS)
   add_executable(argo_ros_tests tests/test_convert.cpp tests/test_ros_driver.cpp)

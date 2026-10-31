@@ -139,6 +139,8 @@ PYBIND11_MODULE(capabilities, m) {
       .def_property_readonly("control", [](const Capabilities& c) { return control_dict(c.control); })
       .def_property_readonly("failsafe",
                              [](const Capabilities& c) { return failsafe_dict(c.failsafe); })
+      .def_readonly("min_obstacle_height_m", &Capabilities::min_obstacle_height_m)
+      .def_readonly("assumed_obstacle_height_m", &Capabilities::assumed_obstacle_height_m)
       .def_readonly("safety_ready", &Capabilities::safety_ready)
       .def_readonly("unreviewed_fields", &Capabilities::unreviewed_fields);
 

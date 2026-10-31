@@ -51,7 +51,7 @@ Runtime::Runtime(capabilities::Profile profile, RuntimeConfig config, Driver& dr
   config_.node.map.record_evidence = true;
   node_ = std::make_unique<node::Node>(std::move(profile), config_.node);
   session_ = std::make_unique<node::Session>(*node_, config_.session);
-  if (!config_.link.target.empty()) {
+  if (!config_.link.target.empty() && !config_.setup_mode) {
     link_ = std::make_unique<node::GrpcLink>(config_.link);
   }
 }
@@ -81,7 +81,21 @@ void Runtime::poll_link(double now) {
   }
 }
 
+void Runtime::request_velocity(const node::Twist& velocity, double for_s) {
+  std::lock_guard<std::mutex> lock(request_mutex_);
+  request_ = velocity;
+  request_for_s_ = for_s;
+  request_pending_ = true;
+}
+
 node::TickResult Runtime::step(double now) {
+  {
+    std::lock_guard<std::mutex> lock(request_mutex_);
+    if (request_pending_ && config_.setup_mode) {
+      node_->request_velocity(request_, now + request_for_s_);
+    }
+    request_pending_ = false;
+  }
   inbox_.take(odom_buffer_, frame_buffer_);
   for (const Odometry& o : odom_buffer_) {
     node_->on_odometry(o);
@@ -91,7 +105,9 @@ node::TickResult Runtime::step(double now) {
   }
   poll_link(now);
   node::TickResult result = session_->step(now);
-  driver_.send(result.command);
+  if (!config_.setup_mode || node_->velocity_requested(now)) {
+    driver_.send(result.command);
+  }
   std::vector<std::string> out = session_->take_outgoing();
   if (link_) {
     link_->send(out);

@@ -5,6 +5,11 @@ its own when commands stop.
 The timeout test moves the robot: forward at a crawl for one second, then silence. It refuses
 to start unless a range sensor shows clear space ahead, or `wheels_up` says the drive wheels
 are off the ground. Explicit stops are always sent afterwards.
+
+Motion goes through Argo in setup mode (`argo --config argo.yaml --setup`) unless `direct`:
+the tool publishes requests on ARGO_SETUP_TOPIC and Argo's safety supervisor checks each one
+before anything reaches the robot. Argo sends nothing between requests, so the robot's own
+timeout is still what is tested.
 """
 
 from __future__ import annotations
@@ -30,6 +35,10 @@ ROS_TYPES = {
     "odometry": ["nav_msgs/msg/Odometry"],
 }
 COMMAND_TYPES = ["geometry_msgs/msg/Twist", "geometry_msgs/msg/TwistStamped"]
+ARGO_SETUP_TOPIC = "/argo/setup/cmd_vel"
+ARGO_FLAGS_TOPIC = "/argo/setup/flags"
+# How long Argo keeps acting on one request: three control periods (see argo --setup).
+ARGO_HOLD_PERIODS = 3
 # A topic passes when it publishes at least this share of its declared rate.
 MIN_RATE_SHARE = 0.8
 CRAWL_MPS = 0.1
@@ -69,6 +78,26 @@ class _Probe:
 
     def now(self) -> float:
         return self.node.get_clock().now().nanoseconds * 1e-9
+
+    def watch_flags(self) -> None:
+        """Keeps every distinct flag set Argo reports, with when it was seen."""
+        self.flags: list[tuple[float, str]] = []
+
+        def on(msg):
+            with self.lock:
+                if not self.flags or self.flags[-1][1] != msg.data:
+                    self.flags.append((self.now(), msg.data))
+
+        self.node.create_subscription(get_message("std_msgs/msg/String"), ARGO_FLAGS_TOPIC, on, 10)
+
+    def flags_since(self, t: float) -> set[str]:
+        with self.lock:
+            seen = [f for at, f in getattr(self, "flags", []) if at >= t]
+            before = [f for at, f in getattr(self, "flags", []) if at < t][-1:]
+        return {name for f in before + seen for name in f.split()}
+
+    def command_topic(self, doc: dict, direct: bool) -> str:
+        return doc["control"]["endpoint"] if direct else ARGO_SETUP_TOPIC
 
     def close(self) -> None:
         self.executor.shutdown()
@@ -175,8 +204,13 @@ def _clear_ahead(probe: _Probe, doc: dict, stats: dict) -> float | None:
     return best
 
 
-def _timeout_check(probe: _Probe, doc: dict, wheels_up: bool, stats: dict, result: LiveResult) -> None:
+def _timeout_check(probe: _Probe, doc: dict, wheels_up: bool, stats: dict, result: LiveResult,
+                   direct: bool = False) -> None:
     control = doc["control"]
+    if not direct and probe.node.count_subscribers(ARGO_SETUP_TOPIC) == 0:
+        result.checks.append(Check("controller timeout", False, "not run: Argo is not in setup mode; start "
+                                   "'argo --config argo.yaml --setup' on the robot (or pass --direct)"))
+        return
     odom = next((s for s in doc["sensors"] if s["kind"] == "odometry"), None) or next(
         (s for s in doc["sensors"] if s["kind"] == "wheel_odom"), None)
     if odom is None:
@@ -199,11 +233,13 @@ def _timeout_check(probe: _Probe, doc: dict, wheels_up: bool, stats: dict, resul
         lambda m: speeds.append((probe.now(), math.hypot(m.twist.twist.linear.x, m.twist.twist.linear.y))),
         qos_profile_sensor_data)
     twist = get_message("geometry_msgs/msg/Twist")
-    pub = probe.node.create_publisher(twist, control["endpoint"], 10)
+    pub = probe.node.create_publisher(twist, probe.command_topic(doc, direct), 10)
     period = 1.0 / control["rate_hz"]
     timeout = control["controller_timeout_s"]
     decel = doc["motion"]["limits"]["x"].get("decel_mps2", 1.0)
-    allowed = timeout + control.get("latency_s", 0.0) + CRAWL_MPS / decel + 0.15
+    # Through Argo, the robot hears its last command a few periods after the tool's last request.
+    relay = 0.0 if direct else ARGO_HOLD_PERIODS * period
+    allowed = relay + timeout + control.get("latency_s", 0.0) + CRAWL_MPS / decel + 0.15
     try:
         cmd = twist()
         cmd.linear.x = CRAWL_MPS
@@ -213,18 +249,21 @@ def _timeout_check(probe: _Probe, doc: dict, wheels_up: bool, stats: dict, resul
             _wait(probe, period)
         moving = [v for t, v in speeds if t > start + 0.5]
         if not moving or max(moving) < 0.5 * CRAWL_MPS:
-            result.checks.append(Check("controller timeout", False, "the robot did not move on a "
-                                       f"{CRAWL_MPS} m/s command; check the command topic and that it is armed"))
+            flags = probe.flags_since(start) - {"no_target"}
+            why = (f"Argo's supervisor reported: {' '.join(sorted(flags))}" if flags and not direct
+                   else "check the command topic and that the robot is armed")
+            result.checks.append(Check("controller timeout", False, f"the robot did not move on a "
+                                       f"{CRAWL_MPS} m/s request; {why}"))
             return
         silent_at = probe.now()
         _wait(probe, allowed + 1.0)
-        after = [(t, v) for t, v in speeds if t > silent_at]
+        after = [(t, v) for t, v in speeds if t > silent_at + relay]
         stopped_at = next((t for t, v in after if v < STOPPED_MPS), None)
         if stopped_at is None:
             result.checks.append(Check("controller timeout", False, f"still moving {allowed + 1.0:.1f} s after "
                                        "commands stopped: the controller has no timeout, Argo cannot rely on it"))
         else:
-            took = stopped_at - silent_at
+            took = stopped_at - silent_at - relay
             ok = took <= allowed
             result.checks.append(Check("controller timeout", ok, f"stopped {took:.2f} s after the last command "
                                        f"(declared timeout {timeout:g} s, allowed {allowed:.2f} s)"))
@@ -238,15 +277,16 @@ def _timeout_check(probe: _Probe, doc: dict, wheels_up: bool, stats: dict, resul
 
 
 def live_check(doc: dict, duration_s: float = 5.0, motion: bool = False, wheels_up: bool = False,
-               sim_time: bool = False) -> LiveResult:
+               sim_time: bool = False, direct: bool = False) -> LiveResult:
     """Runs against the ROS 2 graph this process can see. Needs rclpy initialised."""
     result = LiveResult()
     probe = _Probe(sim_time)
+    probe.watch_flags()
     try:
         time.sleep(1.5)  # discovery, in wall time: simulated time may not be running yet
         stats = _topic_checks(probe, doc, duration_s, result)
         if motion:
-            _timeout_check(probe, doc, wheels_up, stats, result)
+            _timeout_check(probe, doc, wheels_up, stats, result, direct)
     finally:
         probe.close()
     return result

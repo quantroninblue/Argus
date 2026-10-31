@@ -59,6 +59,10 @@ def capability_report(doc: dict) -> str:
     sources = [n for n, v in (("wheel odometry", loc.wheel_odometry), ("external odometry", loc.external_odometry),
                               ("inertial", loc.inertial), ("visual", loc.visual), ("range", loc.range)) if v]
     lines.append(f"  localization from: {', '.join(sources) or 'nothing'}")
+    lines.append(f"  obstacles lower than {caps.min_obstacle_height_m * 100:.0f} cm are treated as ground")
+    if caps.assumed_obstacle_height_m > 0:
+        lines.append(f"  assumed (declared): obstacles stand on the ground and are at least "
+                     f"{caps.assumed_obstacle_height_m * 100:.0f} cm tall")
     lines.append("")
     prov = doc.get("provenance", {})
     unverified = sorted(k for k, v in prov.items() if v in ("declared", "cad", "llm_draft"))

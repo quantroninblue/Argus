@@ -136,7 +136,13 @@ crawls forward at 0.1 m/s for a second (only with clear space ahead on the lidar
 drive wheels lifted and `--wheels-up`), then commands stop and the time to standstill is
 measured. Argo relies on that timeout, so setup does not pass without it.
 
+Motion tests go through Argo in setup mode, so its safety supervisor checks every request the
+same way it checks normal driving. Start Argo with `--setup` on the robot first; it then moves
+only on setup requests and needs no hub. `--direct` sends commands straight to the robot's
+command topic instead, without the supervisor.
+
 ```sh
+argo --config argo.yaml --setup        # on the robot
 python3 -m argus setup check profile.yaml --motion
 ```
 

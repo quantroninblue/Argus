@@ -62,11 +62,13 @@ def _setup(args) -> int:
         if args.motion and not args.yes:
             print("The timeout test drives the robot forward at 0.1 m/s for one second. Keep an e-stop "
                   "in reach and the space ahead clear, or lift the drive wheels (--wheels-up).")
+            if args.direct:
+                print("--direct: Argo's safety supervisor will not check these motions.")
             if input("Type 'go' to start: ").strip() != "go":
                 return 1
         rclpy.init()
         try:
-            result = live_check(doc, args.duration, args.motion, args.wheels_up, args.sim_time)
+            result = live_check(doc, args.duration, args.motion, args.wheels_up, args.sim_time, args.direct)
         finally:
             rclpy.shutdown()
         print(result.text())
@@ -81,11 +83,13 @@ def _setup(args) -> int:
             top = doc["motion"]["limits"]["x"]["velocity_mps"][1]
             print(f"Calibration drives the robot forward up to {top:g} m/s and turns it. It checks the "
                   "scan for room before each run; keep an e-stop in reach and people clear.")
+            if args.direct:
+                print("--direct: Argo's safety supervisor will not check these motions.")
             if input("Type 'go' to start: ").strip() != "go":
                 return 1
         rclpy.init()
         try:
-            cal = calibrate(doc, args.sim_time)
+            cal = calibrate(doc, args.sim_time, args.direct)
         finally:
             rclpy.shutdown()
         print(cal.text())
@@ -161,11 +165,15 @@ def main(argv: list[str] | None = None) -> int:
     chk.add_argument("--wheels-up", action="store_true", help="drive wheels are off the ground")
     chk.add_argument("--sim-time", action="store_true", help="use /clock (simulation)")
     chk.add_argument("--yes", action="store_true", help="skip the confirmation before moving")
+    chk.add_argument("--direct", action="store_true",
+                     help="command the robot directly instead of through Argo's supervisor (argo --setup)")
     cal = steps.add_parser("calibrate", help="stepped motion tests; measured limits written back")
     cal.add_argument("profile")
     cal.add_argument("-o", "--out", required=True, help="where to write the calibrated profile")
     cal.add_argument("--sim-time", action="store_true", help="use /clock (simulation)")
     cal.add_argument("--yes", action="store_true", help="skip the confirmation before moving")
+    cal.add_argument("--direct", action="store_true",
+                     help="command the robot directly instead of through Argo's supervisor (argo --setup)")
     hub = sub.add_parser("hub", help="run the hub: registry, TLS and an operator console")
     hub.add_argument("dir", help="holds profiles/, robots.yaml and pki/")
     hub.add_argument("--listen", default="0.0.0.0:50051")

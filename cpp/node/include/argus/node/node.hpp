@@ -61,6 +61,14 @@ class Node {
   bool set_plan(const Plan& plan, double now);
   TickResult tick(double now);
 
+  // Setup motion tests: a velocity to try in place of the planner's until `until`. The safety
+  // supervisor checks it like any other command.
+  void request_velocity(const Twist& velocity, double until) {
+    requested_ = velocity;
+    requested_until_ = until;
+  }
+  bool velocity_requested(double now) const { return now <= requested_until_; }
+
   // Hub requests. Cancelling with `return_home` sends Argo back along its own trail.
   void cancel_plan(uint64_t generation, bool return_home, double now);
   void set_paused(bool paused, double now);
@@ -128,6 +136,8 @@ class Node {
 
   Proposal proposal_;
   double last_plan_time_ = -1e9;
+  Twist requested_;
+  double requested_until_ = -1e9;
   std::vector<Event> pending_;
   uint32_t last_flags_ = 0;
 
