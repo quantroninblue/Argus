@@ -66,6 +66,9 @@ class Registry:
     def profile(self, profile_id: str) -> Profile:
         return self._profiles[profile_id]
 
+    def robots(self) -> list[Robot]:
+        return list(self._robots.values())
+
     def robot(self, node_id: str) -> Robot | None:
         return self._robots.get(node_id)
 

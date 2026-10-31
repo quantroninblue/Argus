@@ -109,6 +109,15 @@ def _sensor(s: dict, frame: dict, topic: str) -> str:
                 f"<range><min>{rmin}</min><max>{rmax}</max><resolution>0.01</resolution></range>"
                 f"<noise><type>gaussian</type><mean>0</mean><stddev>{RANGE_NOISE_M}</stddev></noise>"
                 "</lidar></sensor>")
+    if kind == "imu":
+        return (head.format(t="imu")
+                + "<imu><angular_velocity><x><noise type=\"gaussian\"><stddev>0.002</stddev></noise></x>"
+                "<y><noise type=\"gaussian\"><stddev>0.002</stddev></noise></y>"
+                "<z><noise type=\"gaussian\"><stddev>0.002</stddev></noise></z></angular_velocity>"
+                "<linear_acceleration><x><noise type=\"gaussian\"><stddev>0.02</stddev></noise></x>"
+                "<y><noise type=\"gaussian\"><stddev>0.02</stddev></noise></y>"
+                "<z><noise type=\"gaussian\"><stddev>0.02</stddev></noise></z></linear_acceleration></imu>"
+                "</sensor>")
     if kind == "depth":
         width = 160
         height = max(2, int(round(width * math.tan(v / 2) / math.tan(h / 2))))
@@ -225,7 +234,7 @@ def model_sdf(doc: dict, name: str = "robot", pose=(0.0, 0.0, 0.0, 0.0)) -> tupl
                         f"</sphere></geometry>{_surface(0.0)}</collision>")
     frames = doc["geometry"].get("frames", {})
     for s in doc.get("sensors", []):
-        if s["kind"] in ("range_2d", "range_3d", "depth"):
+        if s["kind"] in ("range_2d", "range_3d", "depth", "imu"):
             topic = f"/model/{name}/{s['id']}" + ("/image" if s["kind"] == "depth" else "")
             t.sensors[s["id"]] = topic
             t.kinds[s["id"]] = s["kind"]

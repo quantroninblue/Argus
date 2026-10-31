@@ -8,6 +8,7 @@ the connection is attached to that robot's session worker.
 
 from __future__ import annotations
 
+from argus.hub.intake import Intake
 from argus.hub.mission import MissionState
 from argus.hub.registry import Registry
 from argus.hub.session import HubConfig, HubSession
@@ -59,6 +60,7 @@ class Hub:
         self.sites = sites or SiteService()
         self.config = config or HubConfig()
         self.sessions: dict[str, HubSession] = {}
+        self.intake = Intake(self.config.intake)
 
     def connect(self, identity: str | None = None) -> Connection:
         return Connection(self, identity)
@@ -83,6 +85,7 @@ class Hub:
         return self.session(node_id).mission.state
 
     def step(self, now: float) -> None:
+        self.intake.allocate([s for s in self.sessions.values() if s.connection is not None], now)
         for s in self.sessions.values():
             s.step(now)
 

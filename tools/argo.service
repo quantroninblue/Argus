@@ -1,0 +1,19 @@
+# systemd unit for Argo on the robot. Copy the argo binary to /opt/argo/argo and the config,
+# profile and certificates to /etc/argo, then:
+#   sudo cp tools/argo.service /etc/systemd/system/ && sudo systemctl enable --now argo
+# If Argo stops for any reason, the robot's own controller timeout stops the robot; systemd
+# starts Argo again after two seconds and it reconnects to the hub.
+[Unit]
+Description=Argo navigation node
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=argo
+WorkingDirectory=/etc/argo
+ExecStart=/bin/bash -c 'source /opt/ros/jazzy/setup.bash && exec /opt/argo/argo --config /etc/argo/argo.yaml'
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

@@ -32,6 +32,7 @@ def world_sdf(world: World, models: list[str], step_s: float = 0.001) -> str:
             '<plugin filename="gz-sim-physics-system" name="gz::sim::systems::Physics"/>'
             '<plugin filename="gz-sim-sensors-system" name="gz::sim::systems::Sensors">'
             "<render_engine>ogre2</render_engine></plugin>"
+            '<plugin filename="gz-sim-imu-system" name="gz::sim::systems::Imu"/>'
             '<plugin filename="gz-sim-scene-broadcaster-system" name="gz::sim::systems::SceneBroadcaster"/>'
             '<plugin filename="gz-sim-user-commands-system" name="gz::sim::systems::UserCommands"/>'
             '<light type="directional" name="sun"><pose>0 0 10 0 0 0</pose><direction>-0.5 0.1 -0.9</direction>'
@@ -39,10 +40,11 @@ def world_sdf(world: World, models: list[str], step_s: float = 0.001) -> str:
             + floor + "".join(boxes) + "".join(models) + "</world></sdf>")
 
 
-def bridge_entries(doc: dict, topics: Topics) -> list[tuple[str, str, str, str, str]]:
+def bridge_entries(doc: dict, topics: Topics, command_topic: str | None = None) -> list[tuple[str, str, str, str, str]]:
     """(ROS 2 topic, Gazebo topic, ROS 2 type, Gazebo type, direction) for everything bridged:
     sensors and wheel odometry to the profile's ROS 2 topics, the command from ROS 2, simulated
-    time, and the true pose on a topic Argo does not read."""
+    time, and the true pose on a topic Argo does not read. Commands come from `command_topic`
+    (default: the profile's command endpoint)."""
     entries = [("/clock", "/clock", "rosgraph_msgs/msg/Clock", "gz.msgs.Clock", "GZ_TO_ROS")]
     sensors = {s["id"]: s for s in doc.get("sensors", [])}
     for sid, gz in topics.sensors.items():
@@ -53,6 +55,8 @@ def bridge_entries(doc: dict, topics: Topics) -> list[tuple[str, str, str, str, 
         elif kind == "range_3d":
             entries.append((ros, gz + "/points", "sensor_msgs/msg/PointCloud2", "gz.msgs.PointCloudPacked",
                             "GZ_TO_ROS"))
+        elif kind == "imu":
+            entries.append((ros, gz, "sensor_msgs/msg/Imu", "gz.msgs.IMU", "GZ_TO_ROS"))
         elif kind == "depth":
             entries.append((ros, gz, "sensor_msgs/msg/Image", "gz.msgs.Image", "GZ_TO_ROS"))
             info_ros = ros.rsplit("/", 1)[0] + "/camera_info"
@@ -63,15 +67,15 @@ def bridge_entries(doc: dict, topics: Topics) -> list[tuple[str, str, str, str, 
     entries.append((odom["source"]["endpoint"], topics.odom, "nav_msgs/msg/Odometry", "gz.msgs.Odometry",
                     "GZ_TO_ROS"))
     entries.append(("/argus_truth", topics.truth, "nav_msgs/msg/Odometry", "gz.msgs.Odometry", "GZ_TO_ROS"))
-    entries.append((doc["control"]["endpoint"], topics.cmd_vel, "geometry_msgs/msg/Twist", "gz.msgs.Twist",
-                    "ROS_TO_GZ"))
+    entries.append((command_topic or doc["control"]["endpoint"], topics.cmd_vel, "geometry_msgs/msg/Twist",
+                    "gz.msgs.Twist", "ROS_TO_GZ"))
     return entries
 
 
-def bridge_yaml(doc: dict, topics: Topics) -> str:
+def bridge_yaml(entries: list[tuple[str, str, str, str, str]]) -> str:
     """ros_gz parameter_bridge config for `bridge_entries`."""
     lines = []
-    for ros, gz, ros_type, gz_type, direction in bridge_entries(doc, topics):
+    for ros, gz, ros_type, gz_type, direction in entries:
         lines += [f'- ros_topic_name: "{ros}"', f'  gz_topic_name: "{gz}"', f'  ros_type_name: "{ros_type}"',
                   f'  gz_type_name: "{gz_type}"', f"  direction: {direction}"]
     return "\n".join(lines) + "\n"

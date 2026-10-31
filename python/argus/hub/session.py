@@ -10,9 +10,11 @@ from __future__ import annotations
 
 import itertools
 import math
+import time
 from dataclasses import dataclass, field
 
 from argus import sitemap
+from argus.hub.intake import IntakeConfig
 from argus.hub.mission import MissionConfig, MissionManager, MissionState
 from argus.hub.registry import Profile, Robot
 from argus.hub.site import SiteService
@@ -27,6 +29,9 @@ class HubConfig:
     silent_after_s: float = 1.0
     min_obstacle_height_m: float = 0.05
     mission: MissionConfig = field(default_factory=MissionConfig)
+    # How much map evidence the hub takes in (intake.py). Measured offers: about 40 KB/s for a
+    # ground robot, 620 KB/s for a drone while moving.
+    intake: IntakeConfig = field(default_factory=IntakeConfig)
 
 
 def nanos(seconds: float) -> int:
@@ -64,6 +69,16 @@ class HubSession:
         # (time, kind, waypoint id, cause, detail) for every event Argo reported.
         self.events: list[tuple[float, str, str, str, str]] = []
         self.connections = 0
+        # Evidence intake: the rate the hub allots this robot, a token bucket enforcing it, and
+        # what the robot offered and what applying it cost since the last allocation.
+        self.evidence_rate = config.intake.bytes_per_s
+        self._evidence_burst = max(config.intake.min_burst_bytes, config.intake.burst_s * self.evidence_rate)
+        self._evidence_tokens = self._evidence_burst
+        self._evidence_at = -math.inf
+        self.evidence_demand = 0.0
+        self._evidence_offered = 0
+        self._evidence_cpu_s = 0.0
+        self.evidence_dropped = 0  # messages over the allotted rate
         self._beat_seq = 0
         self._seq = 0
         self._stop_sent_for: MissionState | None = None
@@ -94,6 +109,29 @@ class HubSession:
     def detach(self) -> None:
         self.connection = None
 
+    def set_evidence_rate(self, rate: float, intake: IntakeConfig) -> None:
+        self.evidence_rate = rate
+        self._evidence_burst = max(intake.min_burst_bytes, intake.burst_s * rate)
+        self._evidence_tokens = min(self._evidence_tokens, self._evidence_burst)
+
+    def take_evidence_counters(self) -> tuple[int, float]:
+        """Bytes offered and seconds spent applying evidence since the last call."""
+        out = (self._evidence_offered, self._evidence_cpu_s)
+        self._evidence_offered, self._evidence_cpu_s = 0, 0.0
+        return out
+
+    def _evidence_allowed(self, size: int, now: float) -> bool:
+        """Token bucket at the allotted rate."""
+        self._evidence_offered += size
+        if math.isfinite(self._evidence_at):
+            self._evidence_tokens = min(self._evidence_burst,
+                                        self._evidence_tokens + (now - self._evidence_at) * self.evidence_rate)
+        self._evidence_at = now
+        if size > self._evidence_tokens:
+            return False
+        self._evidence_tokens -= size
+        return True
+
     def receive(self, m: link_pb2.NodeMessage, now: float) -> None:
         self.last_heard = now
         body = m.WhichOneof("body")
@@ -116,8 +154,13 @@ class HubSession:
             self._set_failsafe(t.safety == node_messages_pb2.SAFETY_STATE_FAILSAFE)
             self.mission.on_telemetry(t.plan_generation, t.active_waypoint_id)
         elif body == "local_evidence":
-            if self.sites.apply(self.robot.site_id, m.local_evidence):
-                self.evidence_seen = True
+            if not self._evidence_allowed(m.local_evidence.ByteSize(), now):
+                self.evidence_dropped += 1
+            else:
+                started = time.perf_counter()
+                if self.sites.apply(self.robot.site_id, m.local_evidence):
+                    self.evidence_seen = True
+                self._evidence_cpu_s += time.perf_counter() - started
         elif body == "event":
             self._on_event(m.event, now)
 

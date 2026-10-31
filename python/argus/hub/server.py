@@ -43,8 +43,12 @@ class _Servicer(link_pb2_grpc.HubLinkServicer):
 
     async def Session(self, request_iterator, context):
         s = self._server
+        if s.active >= s.max_sessions:
+            await context.abort(grpc.StatusCode.RESOURCE_EXHAUSTED,
+                                f"hub is at its limit of {s.max_sessions} connected robots")
         conn = s.hub.connect(_peer_identity(context) if s.tls else None)
         s.streams += 1
+        s.active += 1
 
         async def read() -> None:
             async for m in request_iterator:
@@ -59,6 +63,7 @@ class _Servicer(link_pb2_grpc.HubLinkServicer):
                     break
                 await asyncio.sleep(s.poll_s)
         finally:
+            s.active -= 1
             reader.cancel()
             conn.close()
 
@@ -69,9 +74,15 @@ class _Servicer(link_pb2_grpc.HubLinkServicer):
         return link_pb2.SensorAck(frames_received=count)
 
 
+# Limits that keep one misbehaving or overloaded robot from taking the hub down.
+MAX_MESSAGE_BYTES = 4 * 1024 * 1024
+MAX_SESSIONS = 64
+
+
 class HubServer:
     def __init__(self, hub: Hub, address: str = "127.0.0.1:0", tls: TlsFiles | None = None,
-                 clock=time.time, step_period_s: float = 0.05, poll_s: float = 0.005) -> None:
+                 clock=time.time, step_period_s: float = 0.05, poll_s: float = 0.005,
+                 max_sessions: int = MAX_SESSIONS) -> None:
         self.hub = hub
         self.address = address
         self.tls = tls
@@ -80,6 +91,8 @@ class HubServer:
         self.poll_s = poll_s
         self.port = 0
         self.streams = 0
+        self.active = 0
+        self.max_sessions = max_sessions
         self._server: grpc.aio.Server | None = None
         self._stepper: asyncio.Task | None = None
 
@@ -88,6 +101,7 @@ class HubServer:
             # Robots send keepalive pings every couple of seconds even when idle.
             ("grpc.http2.min_ping_interval_without_data_ms", 1000),
             ("grpc.keepalive_permit_without_calls", 1),
+            ("grpc.max_receive_message_length", MAX_MESSAGE_BYTES),
         ])
         link_pb2_grpc.add_HubLinkServicer_to_server(_Servicer(self), self._server)
         if self.tls:

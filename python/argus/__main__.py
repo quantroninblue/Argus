@@ -7,6 +7,10 @@
   setup import URDF -a ANSWERS -o PROFILE
                                    a body profile from a URDF and the answers, with its report
   setup report PROFILE             the capability report of a profile
+  setup check PROFILE [--motion]   live checks on the running robot (needs ROS 2)
+  setup calibrate PROFILE -o OUT   stepped motion tests; measured limits written back
+  hub DIR [--listen HOST:PORT] [--intake RATE]
+                                   the hub, with an operator console
 """
 
 from __future__ import annotations
@@ -49,6 +53,49 @@ def _setup(args) -> int:
     if args.step == "template":
         print(ANSWERS_HINT, end="")
         return 0
+    if args.step == "check":
+        import rclpy
+
+        from argus.setup.live import live_check
+
+        doc = profiles.load(args.profile)
+        if args.motion and not args.yes:
+            print("The timeout test drives the robot forward at 0.1 m/s for one second. Keep an e-stop "
+                  "in reach and the space ahead clear, or lift the drive wheels (--wheels-up).")
+            if input("Type 'go' to start: ").strip() != "go":
+                return 1
+        rclpy.init()
+        try:
+            result = live_check(doc, args.duration, args.motion, args.wheels_up, args.sim_time)
+        finally:
+            rclpy.shutdown()
+        print(result.text())
+        return 0 if result.ok else 1
+    if args.step == "calibrate":
+        import rclpy
+
+        from argus.setup.calibrate import calibrate
+
+        doc = profiles.load(args.profile)
+        if not args.yes:
+            top = doc["motion"]["limits"]["x"]["velocity_mps"][1]
+            print(f"Calibration drives the robot forward up to {top:g} m/s and turns it. It checks the "
+                  "scan for room before each run; keep an e-stop in reach and people clear.")
+            if input("Type 'go' to start: ").strip() != "go":
+                return 1
+        rclpy.init()
+        try:
+            cal = calibrate(doc, args.sim_time)
+        finally:
+            rclpy.shutdown()
+        print(cal.text())
+        problems = profiles.problems(cal.profile)
+        if problems:
+            print("\n".join(problems), file=sys.stderr)
+            return 1
+        Path(args.out).write_text(profiles.dump(cal.profile))
+        print(f"wrote {args.out}")
+        return 0 if not cal.problems else 1
     if args.step == "report":
         doc = profiles.load(args.profile)
         problems = profiles.problems(doc)
@@ -107,7 +154,27 @@ def main(argv: list[str] | None = None) -> int:
     imp.add_argument("--package", action="append", help="NAME=DIRECTORY for package:// mesh paths")
     rep_ = steps.add_parser("report", help="the capability report of a profile")
     rep_.add_argument("profile")
+    chk = steps.add_parser("check", help="live checks: topics, types, rates, controller timeout")
+    chk.add_argument("profile")
+    chk.add_argument("--duration", type=float, default=5.0, help="seconds to measure rates over")
+    chk.add_argument("--motion", action="store_true", help="also run the controller timeout test (moves the robot)")
+    chk.add_argument("--wheels-up", action="store_true", help="drive wheels are off the ground")
+    chk.add_argument("--sim-time", action="store_true", help="use /clock (simulation)")
+    chk.add_argument("--yes", action="store_true", help="skip the confirmation before moving")
+    cal = steps.add_parser("calibrate", help="stepped motion tests; measured limits written back")
+    cal.add_argument("profile")
+    cal.add_argument("-o", "--out", required=True, help="where to write the calibrated profile")
+    cal.add_argument("--sim-time", action="store_true", help="use /clock (simulation)")
+    cal.add_argument("--yes", action="store_true", help="skip the confirmation before moving")
+    hub = sub.add_parser("hub", help="run the hub: registry, TLS and an operator console")
+    hub.add_argument("dir", help="holds profiles/, robots.yaml and pki/")
+    hub.add_argument("--listen", default="0.0.0.0:50051")
+    hub.add_argument("--intake", help="bandwidth for map evidence from all robots, e.g. 20Mbit or 2MB (default 16Mbit)")
     args = p.parse_args(argv)
+    if args.command == "hub":
+        from argus.hub.run import main as hub_main
+
+        return hub_main(args.dir, args.listen, args.intake)
     return _certs(args) if args.command == "certs" else _setup(args)
 
 

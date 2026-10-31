@@ -85,3 +85,69 @@ def test_run_log_holds_the_whole_run_and_no_keys(tmp_path):
     assert cmd["messages"] > 100
     assert len(log["commands.csv"].splitlines()) == cmd["messages"] + 1
     assert run["argo"]["events"]["waypoint_reached"] >= 1
+
+
+def test_setup_check_passes_on_a_simulated_robot_and_catches_a_missing_timeout(tmp_path):
+    import rclpy
+
+    from argus.gazebo.robot import isolated_env, start_robot
+    from argus.setup.live import live_check
+
+    doc = _example("planar_differential")
+    results = {}
+    for timeout in (True, False):
+        work = tmp_path / f"timeout-{timeout}"
+        work.mkdir()
+        env = isolated_env()
+        rclpy.init()
+        robot = start_robot(doc, worlds.open_room(), (0.0, 0.0, 0.0, 0.0), work, env, controller_timeout=timeout)
+        try:
+            results[timeout] = live_check(doc, duration_s=3.0, motion=True, sim_time=True)
+        finally:
+            robot.stop()
+            rclpy.shutdown()
+    good, bad = results[True], results[False]
+    assert good.ok, good.text()
+    names = {c.name for c in good.checks}
+    assert {"front_lidar rate", "imu rate", "wheel_odom rate", "command topic", "controller timeout"} <= names
+    timeout_check = next(c for c in bad.checks if c.name == "controller timeout")
+    assert not timeout_check.ok and "no timeout" in timeout_check.detail, bad.text()
+
+
+def _calibrate_in_gazebo(true_doc, declared_doc, work):
+    import rclpy
+
+    from argus.gazebo.robot import isolated_env, start_robot
+    from argus.setup.calibrate import calibrate
+
+    env = isolated_env()
+    rclpy.init()
+    robot = start_robot(true_doc, worlds.open_room(), (-5.0, 0.0, 0.0, 0.0), work, env)
+    try:
+        return calibrate(declared_doc, sim_time=True)
+    finally:
+        robot.stop()
+        rclpy.shutdown()
+
+
+def test_calibration_catches_optimistic_braking_and_a_wider_turn(tmp_path):
+    true_doc = _example("planar_differential")
+    true_doc["motion"]["limits"]["x"]["decel_mps2"] = 1.0
+    declared = copy.deepcopy(true_doc)
+    declared["motion"]["limits"]["x"]["decel_mps2"] = 2.0
+    (tmp_path / "diff").mkdir()
+    cal = _calibrate_in_gazebo(true_doc, declared, tmp_path / "diff")
+    assert cal.problems == [], cal.text()
+    got = {m.field: m for m in cal.measurements}
+    lx = cal.profile["motion"]["limits"]["x"]
+    assert 0.8 <= lx["decel_mps2"] <= 1.2, cal.text()
+    assert cal.profile["provenance"]["motion.limits.x.decel_mps2"] == "calibrated"
+    assert lx["velocity_mps"][1] == pytest.approx(true_doc["motion"]["limits"]["x"]["velocity_mps"][1], rel=0.1)
+    assert "motion.limits.yaw.rate_radps" in got
+    assert profiles.problems(cal.profile) == []
+
+    car = _car_like()
+    (tmp_path / "car").mkdir()
+    cal = _calibrate_in_gazebo(car, car, tmp_path / "car")
+    assert cal.problems == [], cal.text()
+    assert cal.profile["motion"]["min_turn_radius_m"] > 0.85, cal.text()

@@ -12,10 +12,7 @@ Needs a sourced ROS 2 Jazzy environment and a build with the ROS 2 driver (tools
 from __future__ import annotations
 
 import os
-import random
 import shutil
-import signal
-import subprocess
 import tempfile
 import threading
 import time
@@ -38,9 +35,8 @@ from argus.sim.episode import _Judge
 from argus.sim.grpc_episode import _Background
 from argus.sim.world import World
 
-from .model import model_sdf
+from .robot import isolated_env, start_process, start_robot, stop_process
 from .runlog import RosRecorder, write_run_log
-from .world import bridge_entries, bridge_yaml, world_sdf
 
 ROOT = Path(__file__).resolve().parents[3]
 NODE_ID = "gazebo-robot"
@@ -92,23 +88,6 @@ class _Watcher:
         self.node.destroy_node()
 
 
-def _start(cmd: list[str], log: Path, env: dict) -> subprocess.Popen:
-    return subprocess.Popen(cmd, stdout=log.open("w"), stderr=subprocess.STDOUT, env=env, start_new_session=True)
-
-
-def _stop(p: subprocess.Popen, sig=signal.SIGINT, wait_s: float = 5.0) -> None:
-    if p.poll() is not None:
-        return
-    try:
-        os.killpg(p.pid, sig)
-        p.wait(wait_s)
-    except (subprocess.TimeoutExpired, ProcessLookupError):
-        try:
-            os.killpg(p.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-
-
 def run_gazebo_episode(doc: dict, world: World, start, goal, duration_s: float, tolerance_m: float = 0.4,
                        gui: bool = False, workdir: str | None = None, log_store: RunLogStore | None = None,
                        keep_log: bool = False, record_bag: bool = False) -> GazeboEpisode:
@@ -123,9 +102,6 @@ def run_gazebo_episode(doc: dict, world: World, start, goal, duration_s: float, 
     work.mkdir(parents=True, exist_ok=True)
     out = GazeboEpisode(workdir=str(work))
 
-    model, topics = model_sdf(doc, "robot", start)
-    (work / "world.sdf").write_text(world_sdf(world, [model]))
-    (work / "bridge.yaml").write_text(bridge_yaml(doc, topics))
     (work / "profile.yaml").write_text(profiles.dump(doc))
     certs.make_ca(work)
     certs.make_hub(work, ["localhost", "127.0.0.1"])
@@ -136,24 +112,11 @@ def run_gazebo_episode(doc: dict, world: World, start, goal, duration_s: float, 
     registry.add_robot(NODE_ID, profile.id, SITE_ID)
     hub = Hub(registry)
 
-    # Keep this run's topics to itself.
-    env = dict(os.environ)
-    env["ROS_DOMAIN_ID"] = str(random.randint(100, 200))
-    env["ROS_AUTOMATIC_DISCOVERY_RANGE"] = "LOCALHOST"
-    env["GZ_PARTITION"] = f"argus-{os.getpid()}"
-    # Gazebo's discovery otherwise goes out on the first network interface, and on a Wi-Fi
-    # laptop the bridge never finds the server.
-    env["GZ_IP"] = "127.0.0.1"
-    os.environ.update({k: env[k] for k in ("ROS_DOMAIN_ID", "ROS_AUTOMATIC_DISCOVERY_RANGE", "GZ_PARTITION",
-                                           "GZ_IP")})
-
-    entries = bridge_entries(doc, topics)
+    env = isolated_env()
     odom = next((s for s in doc["sensors"] if s["kind"] == "odometry"), None) or next(
         (s for s in doc["sensors"] if s["kind"] == "wheel_odom"), None)
     rclpy.init()
     watcher = _Watcher()
-    recorder = RosRecorder(entries, doc["control"]["endpoint"], odom["source"]["endpoint"] if odom else "",
-                           lambda: watcher.now)
     bg = _Background()
     server = HubServer(hub, tls=TlsFiles(work / "ca.pem", work / "hub.pem", work / "hub.key"),
                        clock=lambda: watcher.now)
@@ -165,20 +128,20 @@ def run_gazebo_episode(doc: dict, world: World, start, goal, duration_s: float, 
 
     argo_bin = os.environ.get("ARGO_BIN", str(ROOT / "build" / "ros" / "argo_ros" / "argo"))
     procs = []
+    robot = None
+    recorder = None
     try:
-        procs.append(_start(["gz", "sim", "-s", "-r", "--headless-rendering", str(work / "world.sdf")],
-                            work / "gz.log", env))
-        if gui:
-            procs.append(_start(["gz", "sim", "-g"], work / "gz_gui.log", env))
-        procs.append(_start(["ros2", "run", "ros_gz_bridge", "parameter_bridge", "--ros-args",
-                             "-p", f"config_file:={work / 'bridge.yaml'}", "-p", "use_sim_time:=true"],
-                            work / "bridge.log", env))
+        robot = start_robot(doc, world, start, work, env, gui=gui)
+        # What Argo publishes on the profile's command topic is recorded too.
+        command = (doc["control"]["endpoint"], "", "geometry_msgs/msg/Twist", "", "")
+        recorder = RosRecorder(robot.entries + [command], doc["control"]["endpoint"],
+                               odom["source"]["endpoint"] if odom else "", lambda: watcher.now)
         if record_bag:
-            procs.append(_start(["ros2", "bag", "record", "-s", "mcap", "-o", str(work / "log" / "bag"),
-                                 "--use-sim-time", "--topics", *sorted({e[0] for e in entries})],
-                                work / "bag.log", env))
-        procs.append(_start([argo_bin, "--config", str(work / "argo.yaml"), "--ros-args",
-                             "-p", "use_sim_time:=true"], work / "argo.log", env))
+            topics = sorted({e[0] for e in robot.entries} | {command[0]})
+            procs.append(start_process(["ros2", "bag", "record", "-s", "mcap", "-o", str(work / "log" / "bag"),
+                                        "--use-sim-time", "--topics", *topics], work / "bag.log", env))
+        procs.append(start_process([argo_bin, "--config", str(work / "argo.yaml"), "--ros-args",
+                                    "-p", "use_sim_time:=true"], work / "argo.log", env))
 
         judge = _Judge(profiles.derive(doc), doc, 0.02)
         wall_limit = time.monotonic() + 3 * duration_s + 60.0
@@ -187,7 +150,7 @@ def run_gazebo_episode(doc: dict, world: World, start, goal, duration_s: float, 
         in_contact = False
         while time.monotonic() < wall_limit:
             time.sleep(0.02)
-            if any(p.poll() is not None for p in procs):
+            if not robot.alive() or any(p.poll() is not None for p in procs):
                 raise RuntimeError(f"a process exited early; logs in {work}")
             with watcher.lock:
                 pose = watcher.pose
@@ -223,12 +186,19 @@ def run_gazebo_episode(doc: dict, world: World, start, goal, duration_s: float, 
         return out
     finally:
         for p in reversed(procs):
-            _stop(p)
-        log_dir = write_run_log(work / "log", work, doc=doc, world=world, model=model, topics=topics,
-                                start=start, goal=goal, tolerance_m=tolerance_m, episode=out, recorder=recorder)
+            stop_process(p)
+        if robot is not None:
+            robot.stop()
+            log_dir = write_run_log(work / "log", work, doc=doc, world=world, model=robot.model, topics=robot.topics,
+                                    start=start, goal=goal, tolerance_m=tolerance_m, episode=out,
+                                    recorder=recorder)
+        else:
+            log_dir = work / "log"
+            log_dir.mkdir(exist_ok=True)
         bg.run(server.stop())
         bg.close()
-        recorder.close()
+        if recorder is not None:
+            recorder.close()
         watcher.close()
         rclpy.shutdown()
         out.log_dir = str(log_dir)

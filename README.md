@@ -129,6 +129,27 @@ distances, the bearings and heights the sensors cover, and which values are stil
 rather than measured. `package://` mesh paths resolve through a sourced ROS 2 environment or
 `--package NAME=DIRECTORY`.
 
+On the robot, with ROS 2 sourced and the robot's drivers running, `setup check` confirms every
+declared topic exists with the right type and publishes at its declared rate. With `--motion`
+it also confirms the robot's own controller stops the robot when commands stop: the robot
+crawls forward at 0.1 m/s for a second (only with clear space ahead on the lidar, or with the
+drive wheels lifted and `--wheels-up`), then commands stop and the time to standstill is
+measured. Argo relies on that timeout, so setup does not pass without it.
+
+```sh
+python3 -m argus setup check profile.yaml --motion
+```
+
+`setup calibrate` then measures command latency, acceleration, top speed, braking, and the
+yaw rate or, for a car-like robot, the real turning radius, by stepped motion tests watched
+through odometry. It checks the scan for room before each run. Measured values replace
+declared ones only where they are worse (slower, weaker braking, wider turns, more latency),
+and are marked `calibrated` in the profile.
+
+```sh
+python3 -m argus setup calibrate profile.yaml -o profile.calibrated.yaml
+```
+
 ## Driving a simulated robot
 
 ```sh
@@ -206,6 +227,32 @@ python3 -m argus certs robot pki robot-1
 
 Keep `pki/ca.key` off the robots; each robot needs only `ca.pem` and its own certificate and
 key.
+
+## Running the hub
+
+The hub reads a directory with the robots' profiles, which profile and site each robot uses,
+and its certificates:
+
+```
+hub/
+  profiles/rover.yaml
+  robots.yaml          # robot-1: {profile: my-rover, site: warehouse}
+  pki/ca.pem pki/hub.pem pki/hub.key
+```
+
+```sh
+export PYTHONPATH=python:build/python
+python3 -m argus hub hub/ --intake 20Mbit
+```
+
+The console takes `goal ROBOT X Y [Z] [TOLERANCE]`, `cancel ROBOT`, `status` and `quit`.
+`--intake` is the bandwidth set aside for map evidence from all robots together. The hub
+shares it fairly between robots and lowers it while applying evidence takes too much of its
+time; evidence over a robot's share is dropped, while heartbeats, telemetry and events are
+always processed, so a busy hub degrades its map rather than its links.
+
+On each robot, `tools/build_argo.sh` builds the `argo` binary (it lists any missing apt
+packages), and `tools/argo.service` runs it under systemd.
 
 ## License
 
