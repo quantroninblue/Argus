@@ -86,6 +86,7 @@ PYBIND11_MODULE(capabilities, m) {
       .def_readonly("bounding_radius_m", &CollisionCapability::bounding_radius_m)
       .def_readonly("body_footprint", &CollisionCapability::body_footprint)
       .def_readonly("body_radius_m", &CollisionCapability::body_radius_m)
+      .def_readonly("inscribed_radius_m", &CollisionCapability::inscribed_radius_m)
       .def_readonly("padding_m", &CollisionCapability::padding_m)
       .def("edge_distance_m", &CollisionCapability::edge_distance_m, py::arg("azimuth_rad"),
            py::arg("elevation_rad") = 0.0);

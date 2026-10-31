@@ -15,6 +15,7 @@ option(ARGUS_BUILD_PYTHON "Build the Python bindings and generated protocol modu
 find_package(Eigen3 3.3 REQUIRED NO_MODULE)
 find_package(yaml-cpp REQUIRED)
 find_package(Protobuf REQUIRED)
+find_package(gRPC CONFIG REQUIRED)
 
 # Python modules built here (bindings, generated protocol code) land in this directory.
 set(ARGUS_PYTHON_OUTPUT_DIR ${CMAKE_BINARY_DIR}/python)
@@ -31,5 +32,7 @@ if(ARGUS_BUILD_PYTHON)
 endif()
 
 add_subdirectory(proto)
+add_subdirectory(cpp/grid)
 add_subdirectory(cpp/capabilities)
 add_subdirectory(cpp/node)
+add_subdirectory(cpp/sitemap)

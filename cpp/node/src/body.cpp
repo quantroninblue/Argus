@@ -58,16 +58,7 @@ BodyVolume::BodyVolume(const capabilities::Capabilities& caps, double ground_z_m
       max_unknown_fraction_(max_unknown_fraction) {
   z_low_ = ground_z_m + min_obstacle_height_m;
   z_high_ = caps.collision.aabb_max.z() + caps.collision.padding_m;
-  inscribed_ = radius_;
-  if (planar_) {
-    const size_t n = footprint_.size();
-    for (size_t i = 0; i < n; ++i) {
-      const Vec2 a = footprint_[i];
-      const Vec2 e = footprint_[(i + 1) % n] - a;
-      const double t = std::clamp(-a.dot(e) / std::max(e.squaredNorm(), 1e-12), 0.0, 1.0);
-      inscribed_ = std::min(inscribed_, (a + t * e).norm());
-    }
-  }
+  inscribed_ = caps.collision.inscribed_radius_m;
 }
 
 Cell BodyVolume::column(const LocalMap& map, int ix, int iy, int z0, int z1) const {

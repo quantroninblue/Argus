@@ -2,16 +2,10 @@
 
 #include <algorithm>
 #include <cmath>
-#include <limits>
 
 namespace argus::node {
 
 namespace {
-
-constexpr int kHit = 6;
-constexpr int kMiss = -2;
-constexpr int kMinLogOdds = -20;
-constexpr int kMaxLogOdds = 12;
 
 int ring(int i, int n) {
   const int r = i % n;
@@ -30,17 +24,15 @@ LocalMap::LocalMap(const LocalMapConfig& config) : config_(config) {
   const size_t n = static_cast<size_t>(dims_.prod());
   log_odds_.assign(n, 0);
   observed_.assign(n, 0);
+  if (config_.record_evidence) {
+    pending_.assign(n, 0);
+    pending_set_.assign(n, 0);
+  }
 }
 
-Index3 LocalMap::index_of(const Vec3& p) const {
-  const double res = config_.resolution_m;
-  return Index3(static_cast<int>(std::floor(p.x() / res)), static_cast<int>(std::floor(p.y() / res)),
-                static_cast<int>(std::floor(p.z() / res)));
-}
+Index3 LocalMap::index_of(const Vec3& p) const { return grid::index_of(p, config_.resolution_m); }
 
-Vec3 LocalMap::center_of(const Index3& i) const {
-  return (i.cast<double>() + Vec3::Constant(0.5)) * config_.resolution_m;
-}
+Vec3 LocalMap::center_of(const Index3& i) const { return grid::center_of(i, config_.resolution_m); }
 
 bool LocalMap::contains(const Index3& i) const {
   return (i.array() >= min_.array()).all() && (i.array() < (min_ + dims_).array()).all();
@@ -58,10 +50,36 @@ Cell LocalMap::cell(const Index3& i) const {
     return Cell::Unknown;
   }
   const size_t s = slot(i);
-  if (!observed_[s]) {
-    return Cell::Unknown;
+  return grid::cell_state(observed_[s] != 0, log_odds_[s]);
+}
+
+Index3 LocalMap::index_of_slot(size_t s) const {
+  const int z = static_cast<int>(s % dims_.z());
+  const int y = static_cast<int>((s / dims_.z()) % dims_.y());
+  const int x = static_cast<int>(s / (static_cast<size_t>(dims_.z()) * dims_.y()));
+  const Index3 r(x, y, z);
+  Index3 out;
+  for (int a = 0; a < 3; ++a) {
+    out[a] = min_[a] + ring(r[a] - min_[a], dims_[a]);
   }
-  return log_odds_[s] > 0 ? Cell::Occupied : Cell::Free;
+  return out;
+}
+
+void LocalMap::flush_pending() {
+  for (size_t s : pending_slots_) {
+    // A cell that was already observed and did not change tells the hub nothing new.
+    if (pending_[s] != 0 || pending_set_[s] == kNewlyObserved) {
+      evidence_.push_back({index_of_slot(s), pending_[s]});
+    }
+    pending_[s] = 0;
+    pending_set_[s] = 0;
+  }
+  pending_slots_.clear();
+}
+
+std::vector<CellDelta> LocalMap::take_evidence() {
+  flush_pending();
+  return std::move(evidence_);
 }
 
 void LocalMap::clear_slab(int axis, int r) {
@@ -90,6 +108,8 @@ void LocalMap::recenter(const Vec3& base) {
   if (next == min_) {
     return;
   }
+  // Slots are about to be reused for other cells; settle what they recorded first.
+  flush_pending();
   for (int axis = 0; axis < 3; ++axis) {
     const int lo = min_[axis];
     const int hi = min_[axis] + dims_[axis];
@@ -109,79 +129,24 @@ void LocalMap::recenter(const Vec3& base) {
 
 void LocalMap::update(const Index3& i, int delta) {
   const size_t s = slot(i);
-  log_odds_[s] = static_cast<int8_t>(std::clamp(log_odds_[s] + delta, kMinLogOdds, kMaxLogOdds));
+  const int8_t before = log_odds_[s];
+  log_odds_[s] = grid::add_log_odds(before, delta);
+  if (config_.record_evidence) {
+    // Record the change actually made, so the hub's cell follows this one step for step.
+    pending_[s] = static_cast<int16_t>(pending_[s] + log_odds_[s] - before);
+    if (!pending_set_[s]) {
+      pending_set_[s] = observed_[s] ? kSeenBefore : kNewlyObserved;
+      pending_slots_.push_back(s);
+    }
+  }
   observed_[s] = 1;
 }
 
 void LocalMap::integrate(const Vec3& origin, const std::vector<Vec3>& ends,
                          const std::vector<bool>& hits) {
-  frame_hits_.clear();
-  for (size_t k = 0; k < ends.size(); ++k) {
-    if (hits[k]) {
-      const Index3 i = index_of(ends[k]);
-      if (contains(i)) {
-        frame_hits_.push_back(slot(i));
-      }
-    }
-  }
-  std::sort(frame_hits_.begin(), frame_hits_.end());
-  frame_hits_.erase(std::unique(frame_hits_.begin(), frame_hits_.end()), frame_hits_.end());
-  auto hit_this_frame = [&](const Index3& i) {
-    return std::binary_search(frame_hits_.begin(), frame_hits_.end(), slot(i));
-  };
-
-  const double res = config_.resolution_m;
-  const double inf = std::numeric_limits<double>::infinity();
-  for (size_t k = 0; k < ends.size(); ++k) {
-    const Vec3 d = ends[k] - origin;
-    if (d.squaredNorm() < 1e-12) {
-      continue;
-    }
-    Index3 cur = index_of(origin);
-    const Index3 last = index_of(ends[k]);
-    Index3 step;
-    Vec3 t_max;
-    Vec3 t_delta;
-    for (int a = 0; a < 3; ++a) {
-      step[a] = d[a] > 0 ? 1 : (d[a] < 0 ? -1 : 0);
-      if (step[a] == 0) {
-        t_max[a] = inf;
-        t_delta[a] = inf;
-      } else {
-        const double boundary = (cur[a] + (step[a] > 0 ? 1 : 0)) * res;
-        t_max[a] = (boundary - origin[a]) / d[a];
-        t_delta[a] = res / std::abs(d[a]);
-      }
-    }
-    // Walk the cells from the sensor to the end point (Amanatides and Woo).
-    const int max_steps = (last - cur).cwiseAbs().sum() + 3;
-    bool entered = false;
-    for (int n = 0; n < max_steps && cur != last; ++n) {
-      if (contains(cur)) {
-        entered = true;
-        if (!hit_this_frame(cur)) {
-          update(cur, kMiss);
-        }
-      } else if (entered) {
-        break;
-      }
-      int a = 0;
-      if (t_max[1] < t_max[a]) a = 1;
-      if (t_max[2] < t_max[a]) a = 2;
-      if (t_max[a] > 1.0) {
-        break;
-      }
-      cur[a] += step[a];
-      t_max[a] += t_delta[a];
-    }
-    if (cur == last && contains(last)) {
-      if (hits[k]) {
-        update(last, kHit);
-      } else if (!hit_this_frame(last)) {
-        update(last, kMiss);
-      }
-    }
-  }
+  tracer_.trace(
+      origin, ends, hits, config_.resolution_m, [this](const Index3& i) { return contains(i); },
+      [this](const Index3& i, int delta) { update(i, delta); });
 }
 
 }  // namespace argus::node

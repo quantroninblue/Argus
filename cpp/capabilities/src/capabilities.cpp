@@ -63,6 +63,16 @@ CollisionCapability derive_collision(const Profile& profile) {
     hull = convex_hull(padded);
   }
   c.footprint = hull;
+  c.inscribed_radius_m = c.bounding_radius_m;
+  if (c.space == MotionSpace::Planar) {
+    const size_t n = hull.size();
+    for (size_t i = 0; i < n; ++i) {
+      const Vec2 a = hull[i];
+      const Vec2 e = hull[(i + 1) % n] - a;
+      const double t = std::clamp(-a.dot(e) / std::max(e.squaredNorm(), 1e-12), 0.0, 1.0);
+      c.inscribed_radius_m = std::min(c.inscribed_radius_m, (a + t * e).norm());
+    }
+  }
   return c;
 }
 

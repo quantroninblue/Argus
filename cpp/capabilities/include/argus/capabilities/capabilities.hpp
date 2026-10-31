@@ -54,6 +54,9 @@ struct CollisionCapability {
   std::vector<Vec2> body_footprint;
   double body_radius_m = 0.0;
   double padding_m = 0.0;
+  // Distance from the base origin to the nearest padded footprint edge (planar bodies), or the
+  // padded bounding radius (aerial bodies).
+  double inscribed_radius_m = 0.0;
   MotionSpace space = MotionSpace::Planar;
 
   // Distance from the base origin to the padded body edge along a bearing.

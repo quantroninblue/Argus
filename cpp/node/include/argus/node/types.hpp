@@ -73,7 +73,18 @@ enum class FailureCause {
   LinkLost,
 };
 
-enum class EventKind { PlanAccepted, PlanRejected, WaypointReached, PlanComplete, PlanExpired, Blocked };
+enum class EventKind {
+  PlanAccepted,
+  PlanRejected,
+  WaypointReached,
+  PlanComplete,
+  PlanExpired,
+  Blocked,
+  FailsafeEntered,
+  // The failsafe's own motion has finished (leg done, home reached, at landing height).
+  FailsafeDone,
+  FailsafeCleared,
+};
 
 struct Event {
   double stamp = 0.0;

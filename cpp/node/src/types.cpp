@@ -59,6 +59,12 @@ std::string to_string(EventKind kind) {
       return "plan_expired";
     case EventKind::Blocked:
       return "blocked";
+    case EventKind::FailsafeEntered:
+      return "failsafe_entered";
+    case EventKind::FailsafeDone:
+      return "failsafe_done";
+    case EventKind::FailsafeCleared:
+      return "failsafe_cleared";
   }
   return "blocked";
 }

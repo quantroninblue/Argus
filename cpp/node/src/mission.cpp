@@ -46,6 +46,20 @@ void Mission::update(const Pose4& pose, bool planar, double now, std::vector<Eve
   }
 }
 
+void Mission::override_plan(const Plan& plan) {
+  plan_ = plan;
+  next_ = 0;
+  active_ = !plan_.waypoints.empty();
+}
+
+void Mission::keep_current_only() {
+  if (!active_) {
+    return;
+  }
+  plan_.waypoints = {plan_.waypoints[next_]};
+  next_ = 0;
+}
+
 const Waypoint* Mission::target() const {
   return active_ ? &plan_.waypoints[next_] : nullptr;
 }

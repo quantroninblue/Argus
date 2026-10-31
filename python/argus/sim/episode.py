@@ -30,6 +30,8 @@ class SimOptions:
     sensors_stop_at_s: float | None = None
     # Odometry reports itself unhealthy from this time on.
     odometry_fails_at_s: float | None = None
+    # Single range sensors that stop publishing, by id, from the given time on.
+    sensor_fails_at_s: dict[str, float] = field(default_factory=dict)
     seed: int = 0
     # Keep one row per control tick in Episode.trace.
     trace: bool = False
@@ -259,70 +261,113 @@ def _polygon_meets_rect(poly: np.ndarray, lo: np.ndarray, hi: np.ndarray) -> boo
     return True
 
 
-def run_episode(doc: dict, world: World, start, waypoints: list[dict], duration_s: float,
-                options: SimOptions | None = None, config=None) -> Episode:
-    """Drives one body from `start` (x, y, z, yaw) through `waypoints` in `world`."""
-    options = options or SimOptions()
-    caps = profiles.derive(doc)
-    node = argo.Node(profiles.dump(doc), config or argo.NodeConfig())
-    plant = Plant(caps, start, node.control_period_s + caps.motion.latency_s)
-    judge = _Judge(caps, doc, node.control_period_s)
-    rng = np.random.default_rng(options.seed)
-    specs = {s["id"]: s for s in doc["sensors"]}
-    sensors = [_Sensor(specs[i], node, rng) for i in node.range_sensor_ids()]
-    result = Episode(profile_id=doc["id"], world=world.name)
+class Simulation:
+    """One body in one world, stepped at a fixed time step.
 
-    dt = min(options.dt, node.control_period_s / 2)
-    fault_at = min(x for x in (options.sensors_stop_at_s, options.odometry_fails_at_s, math.inf)
-                   if x is not None)
-    next_odom = next_tick = 0.0
-    steps = int(math.ceil(duration_s / dt))
-    for k in range(steps + 1):
-        t = k * dt
-        if t >= next_odom - EPS:
-            healthy = options.odometry_fails_at_s is None or t < options.odometry_fails_at_s
+    Each step feeds Argo the odometry and range frames due at that time, calls `tick` (which
+    returns Argo's tick result) when a control tick is due, sends the command to the plant and
+    moves the body. Whoever drives the simulation decides what a tick is: the Node directly, or
+    Argo's session with a hub behind it.
+    """
+
+    def __init__(self, doc: dict, world: World, start, options: SimOptions | None = None, config=None):
+        self.options = options or SimOptions()
+        self.doc = doc
+        self.world = world
+        self.caps = profiles.derive(doc)
+        self.node = argo.Node(profiles.dump(doc), config or argo.NodeConfig())
+        self.plant = Plant(self.caps, start, self.node.control_period_s + self.caps.motion.latency_s)
+        self.judge = _Judge(self.caps, doc, self.node.control_period_s)
+        rng = np.random.default_rng(self.options.seed)
+        specs = {s["id"]: s for s in doc["sensors"]}
+        self.sensors = [_Sensor(specs[i], self.node, rng) for i in self.node.range_sensor_ids()]
+        self.result = Episode(profile_id=doc["id"], world=world.name)
+        self.dt = min(self.options.dt, self.node.control_period_s / 2)
+        o = self.options
+        self.fault_at = min(x for x in (o.sensors_stop_at_s, o.odometry_fails_at_s, math.inf) if x is not None)
+        self.k = 0
+        self._next_odom = 0.0
+        self._next_tick = 0.0
+        self._odom_yaw = self.plant.yaw
+
+    @property
+    def t(self) -> float:
+        return self.k * self.dt
+
+    @property
+    def speed(self) -> float:
+        return float(np.linalg.norm(self.plant.vel))
+
+    @property
+    def at_rest(self) -> bool:
+        return self.speed < 0.01 and abs(self.plant.w) < 0.01
+
+    @property
+    def pose(self) -> tuple[float, float, float, float]:
+        return (*self.plant.pos.tolist(), self.plant.yaw)
+
+    def step(self, tick) -> dict | None:
+        """Advances one time step. Returns the tick result if a control tick was due."""
+        t, o, node, plant, result = self.t, self.options, self.node, self.plant, self.result
+        if t >= self._next_odom - EPS:
+            healthy = o.odometry_fails_at_s is None or t < o.odometry_fails_at_s
             node.on_odometry(t, plant.pos.tolist(), plant.yaw, plant.vel.tolist(), plant.w, healthy)
             # Setpoint velocities are in odom; judge them in the base frame Argo last knew.
-            odom_yaw = plant.yaw
-            next_odom += 1.0 / options.odom_rate_hz
-        for s in sensors:
+            self._odom_yaw = plant.yaw
+            self._next_odom += 1.0 / o.odom_rate_hz
+        for s in self.sensors:
             if t >= s.next - EPS:
                 s.next += s.period
-                if options.sensors_stop_at_s is None or t < options.sensors_stop_at_s:
-                    node.on_range_frame(t, s.id, s.frame(world, plant.pos, plant.yaw, options.range_noise_m))
-        if k == 0:
-            node.set_plan(1, duration_s + 60.0, waypoints, 0.0)
-        if t >= next_tick - EPS:
-            tick = node.tick(t)
-            next_tick += node.control_period_s
-            result.events += tick["events"]
-            for e in tick["events"]:
+                failed = s.id in o.sensor_fails_at_s and t >= o.sensor_fails_at_s[s.id]
+                if not failed and (o.sensors_stop_at_s is None or t < o.sensors_stop_at_s):
+                    node.on_range_frame(t, s.id, s.frame(self.world, plant.pos, plant.yaw, o.range_noise_m))
+        out = None
+        if t >= self._next_tick - EPS:
+            out = tick(t)
+            self._next_tick += node.control_period_s
+            result.events += out["events"]
+            for e in out["events"]:
                 if e["kind"] == "waypoint_reached":
                     result.reached.append(e["waypoint_id"])
                 if e["kind"] == "plan_complete":
                     result.complete = True
-            result.violations += judge.command(t, tick["command"], odom_yaw)
-            for f in tick["flags"]:
+            result.violations += self.judge.command(t, out["command"], self._odom_yaw)
+            for f in out["flags"]:
                 result.flag_counts[f] = result.flag_counts.get(f, 0) + 1
-            if options.trace:
-                result.trace.append({"t": t, "pose": (*plant.pos.tolist(), plant.yaw),
-                                     "flags": tick["flags"], "proposed": tick["proposed"],
-                                     "planner": tick["planner"],
+            if o.trace:
+                result.trace.append({"t": t, "pose": self.pose, "flags": out["flags"],
+                                     "proposed": out["proposed"], "planner": out["planner"],
                                      "path": len(node.path())})
-            plant.send(t, tick["command"])
+            plant.send(t, out["command"])
 
         before = plant.pos.copy()
-        plant.step(t, dt)
+        plant.step(t, self.dt)
         result.distance_m += float(np.linalg.norm(plant.pos - before))
-        speed = float(np.linalg.norm(plant.vel))
-        result.max_speed_mps = max(result.max_speed_mps, speed)
-        if judge.collides(world, plant.pos, plant.yaw):
+        result.max_speed_mps = max(result.max_speed_mps, self.speed)
+        if self.judge.collides(self.world, plant.pos, plant.yaw):
             result.collided = True
-        if t >= fault_at and result.rest_after_fault_s is None and speed < 0.01 and abs(plant.w) < 0.01:
+        if t >= self.fault_at and result.rest_after_fault_s is None and self.at_rest:
             result.rest_after_fault_s = t
         result.time_s = t
-        if result.complete and speed < 0.01:
-            break
+        result.final_pose = self.pose
+        self.k += 1
+        return out
 
-    result.final_pose = (*plant.pos.tolist(), plant.yaw)
-    return result
+
+def run_episode(doc: dict, world: World, start, waypoints: list[dict], duration_s: float,
+                options: SimOptions | None = None, config=None) -> Episode:
+    """Drives one body from `start` (x, y, z, yaw) through `waypoints` in `world`."""
+    sim = Simulation(doc, world, start, options, config)
+    node = sim.node
+
+    def tick(t: float) -> dict:
+        if t == 0.0:
+            node.set_plan(1, duration_s + 60.0, waypoints, 0.0)
+        return node.tick(t)
+
+    steps = int(math.ceil(duration_s / sim.dt))
+    for _ in range(steps + 1):
+        sim.step(tick)
+        if sim.result.complete and sim.speed < 0.01:
+            break
+    return sim.result

@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <stdexcept>
 
 #include "argus/node/adapter.hpp"
@@ -31,13 +32,25 @@ LocalMapConfig map_config(const capabilities::Profile& profile, const capabiliti
   return m;
 }
 
-FailureCause cause_of(uint32_t flags) {
+FailureCause hard_cause(uint32_t flags) {
   if (flags & kLocalization) return FailureCause::LocalizationInvalid;
   if (flags & kDeadline) return FailureCause::ComputeDeadlineMiss;
   if (flags & kStaleSensor) return FailureCause::SensorInvalid;
+  return FailureCause::None;
+}
+
+// Why the robot is not getting closer. Only a dead end may change the hub's exploration memory,
+// so it is reported only when the local map itself shows no way to the waypoint.
+FailureCause cause_of(uint32_t flags, const Proposal& proposal) {
+  const FailureCause hard = hard_cause(flags);
+  if (hard != FailureCause::None) return hard;
+  if (proposal.target_blocked) return FailureCause::TemporaryObstruction;
+  if (proposal.path_exhausted) return FailureCause::DeadEndObserved;
   if (flags & kBlocked) return FailureCause::TemporaryObstruction;
   return FailureCause::ControllerNoProgress;
 }
+
+std::string action_name(capabilities::LinkLostAction a) { return capabilities::to_string(a); }
 
 }  // namespace
 
@@ -108,6 +121,16 @@ void Node::on_odometry(const Odometry& odom) {
     history_.pop_front();
   }
   map_.recenter(odom.pose.position);
+  if (crumbs_.empty() || (crumbs_.back() - odom.pose.position).norm() >= config_.breadcrumb_spacing_m) {
+    crumbs_.push_back(odom.pose.position);
+    if (crumbs_.size() > config_.max_breadcrumbs) {
+      // Thin the trail evenly, keeping home and the newest point.
+      std::vector<Vec3> thinned;
+      for (size_t i = 0; i < crumbs_.size(); i += 2) thinned.push_back(crumbs_[i]);
+      if (!(thinned.back() - crumbs_.back()).isZero()) thinned.push_back(crumbs_.back());
+      crumbs_.swap(thinned);
+    }
+  }
 }
 
 bool Node::pose_at(double stamp, Pose4& pose) const {
@@ -192,6 +215,8 @@ bool Node::set_plan(const Plan& plan, double now) {
   std::string reason;
   if (!caps_.safety_ready) {
     reason = "profile has unreviewed LLM draft fields";
+  } else if (failsafe_active_) {
+    reason = "failsafe active";
   } else if (mission_.accept(plan, now, reason)) {
     pending_.push_back({now, EventKind::PlanAccepted, "", FailureCause::None, ""});
     return true;
@@ -219,9 +244,156 @@ void Node::watch_progress(const Waypoint* target, uint32_t flags, double now, st
     best_distance_ = distance;
     last_progress_ = now;
   } else if (now - last_progress_ > config_.no_progress_s) {
-    events.push_back({now, EventKind::Blocked, target->id, cause_of(flags), "no progress"});
+    events.push_back({now, EventKind::Blocked, target->id, cause_of(flags, proposal_), "no progress"});
     last_progress_ = now;
   }
+}
+
+void Node::watch_dead_end(const Waypoint* target, double now, std::vector<Event>& events) {
+  const bool exhausted = target && proposal_.has_target && proposal_.path_exhausted && !proposal_.target_blocked;
+  const std::string key = target ? std::to_string(mission_.generation()) + "/" + target->id : "";
+  if (key != dead_end_target_) {
+    dead_end_target_ = key;
+    dead_end_reported_ = false;
+    exhausted_since_ = -1.0;
+  }
+  if (!exhausted) {
+    exhausted_since_ = -1.0;
+    return;
+  }
+  if (exhausted_since_ < 0.0) {
+    exhausted_since_ = now;
+  }
+  if (!dead_end_reported_ && now - exhausted_since_ >= config_.dead_end_s) {
+    events.push_back({now, EventKind::Blocked, target->id, FailureCause::DeadEndObserved,
+                      "no way through the local map"});
+    dead_end_reported_ = true;
+  }
+}
+
+void Node::cancel_plan(uint64_t generation, bool home, double now) {
+  if (generation < mission_.generation() || failsafe_active_) {
+    return;
+  }
+  mission_.clear();
+  if (home) {
+    return_home(now);
+  }
+}
+
+void Node::set_paused(bool paused, double) { paused_ = paused; }
+
+Plan Node::home_plan() const {
+  Plan plan;
+  plan.generation = mission_.generation();
+  plan.expires = std::numeric_limits<double>::infinity();
+  if (crumbs_.empty() || !have_odom_) {
+    return plan;
+  }
+  // Walk the trail backwards, cutting out loops: when a crumb comes close to one already on the
+  // way back, everything after that one is a detour.
+  const double near = config_.breadcrumb_spacing_m;
+  std::vector<Vec3> back{odom_.pose.position};
+  for (auto it = crumbs_.rbegin(); it != crumbs_.rend(); ++it) {
+    size_t hit = back.size();
+    for (size_t i = 0; i + 1 < back.size(); ++i) {
+      if ((back[i] - *it).norm() < near) {
+        hit = i;
+        break;
+      }
+    }
+    if (hit < back.size()) {
+      back.resize(hit + 1);
+    } else {
+      back.push_back(*it);
+    }
+  }
+  back.push_back(crumbs_.front());
+  double since = 0.0;
+  for (size_t i = 1; i < back.size(); ++i) {
+    since += (back[i] - back[i - 1]).norm();
+    const bool last = i + 1 == back.size();
+    if (since >= 1.0 || last) {
+      Waypoint wp;
+      wp.id = "home-" + std::to_string(plan.waypoints.size());
+      wp.position = back[i];
+      wp.tolerance_m = last ? 0.25 : 0.4;
+      plan.waypoints.push_back(wp);
+      since = 0.0;
+    }
+  }
+  return plan;
+}
+
+Plan Node::land_plan() const {
+  Plan plan;
+  plan.generation = mission_.generation();
+  plan.expires = std::numeric_limits<double>::infinity();
+  if (!have_odom_) {
+    return plan;
+  }
+  // Highest observed obstacle below the base: the floor to settle above. With no floor in
+  // view, stay where we are rather than descend blind.
+  const Vec3 p = odom_.pose.position;
+  const Index3 top = map_.index_of(p);
+  for (int z = top.z() - 1; z >= map_.window_min().z(); --z) {
+    if (map_.cell(Index3(top.x(), top.y(), z)) == Cell::Occupied) {
+      const double floor_z = (z + 1) * map_.resolution();
+      Waypoint wp;
+      wp.id = "land";
+      wp.position = Vec3(p.x(), p.y(), std::min(p.z(), floor_z + body_->radius_m() + 0.15));
+      wp.tolerance_m = 0.15;
+      plan.waypoints.push_back(wp);
+      break;
+    }
+  }
+  return plan;
+}
+
+void Node::return_home(double now) {
+  if (failsafe_active_) {
+    return;
+  }
+  mission_.override_plan(home_plan());
+  pending_.push_back({now, EventKind::PlanAccepted, "", FailureCause::None, "return home"});
+}
+
+void Node::enter_failsafe(capabilities::LinkLostAction action, double now) {
+  if (failsafe_active_) {
+    return;
+  }
+  failsafe_active_ = true;
+  failsafe_action_ = action;
+  paused_ = false;
+  using capabilities::LinkLostAction;
+  switch (action) {
+    case LinkLostAction::Stop:
+    case LinkLostAction::Hold:
+      mission_.clear();
+      break;
+    case LinkLostAction::FinishLegThenStop:
+      mission_.keep_current_only();
+      break;
+    case LinkLostAction::ReturnHome:
+      mission_.override_plan(home_plan());
+      break;
+    case LinkLostAction::Land:
+      mission_.override_plan(land_plan());
+      break;
+  }
+  pending_.push_back({now, EventKind::FailsafeEntered, "", FailureCause::LinkLost, action_name(action)});
+  if (!mission_.active()) {
+    pending_.push_back({now, EventKind::FailsafeDone, "", FailureCause::None, action_name(action)});
+  }
+}
+
+void Node::clear_failsafe(double now) {
+  if (!failsafe_active_) {
+    return;
+  }
+  failsafe_active_ = false;
+  mission_.clear();
+  pending_.push_back({now, EventKind::FailsafeCleared, "", FailureCause::None, action_name(failsafe_action_)});
 }
 
 TickResult Node::tick(double now) {
@@ -234,8 +406,25 @@ TickResult Node::tick(double now) {
   }
 
   const bool planar = caps_.motion.space == MotionSpace::Planar;
-  mission_.update(odom_.pose, planar, now, result.events);
-  const Waypoint* target = mission_.target();
+  if (failsafe_active_) {
+    // The failsafe's own plan: report only that it finished, not its waypoints.
+    std::vector<Event> internal;
+    const bool was_active = mission_.active();
+    mission_.update(odom_.pose, planar, now, internal);
+    if (was_active && !mission_.active()) {
+      result.events.push_back({now, EventKind::FailsafeDone, "", FailureCause::None, action_name(failsafe_action_)});
+    }
+  } else {
+    mission_.update(odom_.pose, planar, now, result.events);
+  }
+  const Waypoint* active = paused_ ? nullptr : mission_.target();
+  Waypoint capped;
+  if (active && speed_cap_ > 0.0) {
+    capped = *active;
+    capped.speed_cap_mps = capped.speed_cap_mps > 0.0 ? std::min(capped.speed_cap_mps, speed_cap_) : speed_cap_;
+    active = &capped;
+  }
+  const Waypoint* target = active;
   const SafetyInputs in{odom_, map_, clock_, now};
 
   if (!target) {
@@ -252,15 +441,20 @@ TickResult Node::tick(double now) {
   result.proposal = proposal_;
   result.command = make_command(caps_.control.interface, caps_.motion, odom_, verdict.velocity, now,
                                 control_period_ + caps_.motion.latency_s);
+  std::vector<Event> step_events;
   if (target) {
     result.target_id = target->id;
     const uint32_t hard = kStaleSensor | kLocalization | kDeadline;
     const uint32_t raised = verdict.flags & hard & ~last_flags_;
     if (raised) {
-      result.events.push_back({now, EventKind::Blocked, target->id, cause_of(raised), ""});
+      step_events.push_back({now, EventKind::Blocked, target->id, hard_cause(raised), ""});
     }
   }
-  watch_progress(target, verdict.flags, now, result.events);
+  watch_progress(target, verdict.flags, now, step_events);
+  watch_dead_end(target, now, step_events);
+  if (!failsafe_active_) {
+    result.events.insert(result.events.end(), step_events.begin(), step_events.end());
+  }
   last_flags_ = verdict.flags;
   return result;
 }

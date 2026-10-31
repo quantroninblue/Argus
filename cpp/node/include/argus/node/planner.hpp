@@ -26,6 +26,9 @@ struct Proposal {
   Twist velocity;
   bool has_target = false;
   bool path_reaches_target = false;
+  // The local map shows no way to the target at all (see PathResult::exhausted).
+  bool path_exhausted = false;
+  bool target_blocked = false;
   // How the choice went: velocities sampled, rollouts that stayed clear, supervisor checks.
   int candidates = 0;
   int clear_rollouts = 0;
@@ -66,6 +69,8 @@ class LocalPlanner {
   PathSearch search_;
   std::vector<Vec3> path_;
   bool path_reaches_ = false;
+  bool path_exhausted_ = false;
+  bool target_blocked_ = false;
   double last_replan_ = -std::numeric_limits<double>::infinity();
   Vec3 last_goal_ = Vec3::Constant(std::numeric_limits<double>::quiet_NaN());
   std::vector<Vec2> probes_;

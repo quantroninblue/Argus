@@ -1,0 +1,10 @@
+add_library(argus_grid src/evidence.cpp src/search.cpp)
+target_include_directories(argus_grid PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(argus_grid PUBLIC Eigen3::Eigen)
+target_compile_options(argus_grid PRIVATE -Wall -Wextra -Wpedantic)
+
+if(ARGUS_BUILD_TESTS)
+  add_executable(argus_grid_tests tests/test_grid.cpp)
+  target_link_libraries(argus_grid_tests PRIVATE argus_grid GTest::gtest_main)
+  gtest_discover_tests(argus_grid_tests)
+endif()

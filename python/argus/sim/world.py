@@ -98,3 +98,41 @@ def pillars(seed: int, count: int = 10, keep_clear: list[tuple[float, float]] | 
         world.add((cx - s / 2, cy - s / 2, 0.0), (cx + s / 2, cy + s / 2, height))
         placed += 1
     return world
+
+
+def dead_end_branch(height: float = 2.0) -> World:
+    """Start in the west, goal in the north-east. A corridor along the north wall is the short
+    way, but a wall closes it at x = 3, out of sight from the start. The way through is the
+    long corridor along the south wall."""
+    world = _room(World(name="dead_end_branch"), 7.0, 7.0, height)
+    world.add((-3.2, -4.0, 0.0), (-3.0, 4.0, height))  # hides the corridors' far ends
+    world.add((-3.2, 4.0, 0.0), (3.2, 4.2, height))  # north corridor floor
+    world.add((3.0, 4.2, 0.0), (3.2, 7.0, height))  # closes the north corridor
+    world.add((-3.2, -4.2, 0.0), (3.2, -4.0, height))  # south corridor ceiling, open at its east end
+    world.add((3.0, -4.0, 0.0), (3.2, 4.0, height))  # east side of the block between them
+    return world
+
+
+def deep_cup(height: float = 2.0) -> World:
+    """A cup that opens east, away from a start in the west. A goal near its closed end means
+    going round it, farther from the goal at first."""
+    world = _room(World(name="deep_cup"), 7.0, 7.0, height)
+    world.add((0.0, -2.0, 0.0), (0.2, 2.0, height))
+    world.add((0.0, 2.0, 0.0), (5.0, 2.2, height))
+    world.add((0.0, -2.2, 0.0), (5.0, -2.0, height))
+    return world
+
+
+def two_gaps(wall_x: float = 2.5, height: float = 2.0) -> World:
+    """A wall across the room with a gap near the middle and another near the south wall."""
+    world = _room(World(name="two_gaps"), 7.0, 7.0, height)
+    world.add((wall_x, -7.0, 0.0), (wall_x + 0.2, -6.0, height))
+    world.add((wall_x, -4.5, 0.0), (wall_x + 0.2, 0.5, height))
+    world.add((wall_x, 2.0, 0.0), (wall_x + 0.2, 7.0, height))
+    return world
+
+
+def with_ceiling(world: World, z: float) -> World:
+    """Closes a room from above so aerial bodies cannot fly over its walls."""
+    lo, hi = world.boxes[:, 0:2].min(axis=0), world.boxes[:, 3:5].max(axis=0)
+    return world.add((lo[0], lo[1], z), (hi[0], hi[1], z + 0.2))

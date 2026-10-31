@@ -119,6 +119,8 @@ void LocalPlanner::replan(const LocalMap& map, const Pose4& pose, const Vec3& go
   const PathResult result = search_.find(ws_, req);
   path_ = result.points;
   path_reaches_ = result.reached;
+  path_exhausted_ = result.exhausted;
+  target_blocked_ = result.goal_blocked;
 }
 
 Vec3 LocalPlanner::carrot(const Pose4& pose, const Vec3& goal) const {
@@ -251,7 +253,8 @@ bool LocalPlanner::evaluate(const Twist& target, const Odometry& odom, const Vec
     }
     return to.norm();
   };
-  double distance = distance_to_carrot(pose);
+  const double start_distance = distance_to_carrot(pose);
+  double distance = start_distance;
   // Heading is judged against the bearing to the carrot from where the rollout starts, and by
   // its best value along the rollout, for the same reason as the distance.
   const Vec3 from_start = carrot - odom.pose.position;
@@ -273,12 +276,17 @@ bool LocalPlanner::evaluate(const Twist& target, const Odometry& odom, const Vec
       ++unknown;
     }
   }
-  double cost = distance;
+  // Closest approach alone makes driving away free; a rollout that ends farther from the
+  // carrot than it started pays for the distance lost.
+  double cost = distance + 0.5 * std::max(0.0, distance_to_carrot(pose) - start_distance);
   if (judge_heading) {
     const bool steers = m.space == MotionSpace::Planar && !m.can_strafe;
     cost += (steers ? 0.4 : 0.2) * heading;
   }
-  cost += 0.5 * std::max(0.0, kComfortMargin - min_clear) / kComfortMargin;
+  // Comfort is wanted up to the clearance the carrot itself has; a target close to an obstacle
+  // (a landing height, a waypoint by a wall) must stay reachable.
+  const double comfort = std::clamp(body_clearance(Pose4{carrot, odom.pose.yaw}), 0.0, kComfortMargin);
+  cost += 0.5 * std::max(0.0, comfort - min_clear) / kComfortMargin;
   cost += 0.3 * unknown / static_cast<double>(steps);
   if (target.linear.x() < 0.0 && m.space == MotionSpace::Planar && travel_bearing_ == 0.0) {
     cost += 0.3;
@@ -302,6 +310,8 @@ Proposal LocalPlanner::plan(const LocalMap& map, const Waypoint& target,
     last_goal_ = target.position;
   }
   proposal.path_reaches_target = path_reaches_;
+  proposal.path_exhausted = path_exhausted_;
+  proposal.target_blocked = target_blocked_;
 
   const Vec3 aim = carrot(pose, target.position);
   const double start = body_clearance(pose);

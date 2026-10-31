@@ -3,15 +3,15 @@
 #include <cstdint>
 #include <vector>
 
-#include <Eigen/Core>
-
+#include "argus/grid/evidence.hpp"
+#include "argus/grid/trace.hpp"
 #include "argus/node/types.hpp"
 
 namespace argus::node {
 
-enum class Cell : uint8_t { Unknown, Free, Occupied };
-
-using Index3 = Eigen::Vector3i;
+using grid::Cell;
+using grid::CellDelta;
+using grid::Index3;
 
 struct LocalMapConfig {
   double resolution_m = 0.1;
@@ -19,6 +19,9 @@ struct LocalMapConfig {
   // Vertical window relative to the base origin.
   double z_below_m = 1.0;
   double z_above_m = 1.0;
+  // Keep the log-odds changes since the last take_evidence() call, for the hub's site map.
+  // Only changes actually made are kept, plus cells observed for the first time.
+  bool record_evidence = false;
 };
 
 // Short-horizon voxel map in the odom frame that moves with the robot. A ring buffer: cells
@@ -46,10 +49,16 @@ class LocalMap {
   double resolution() const { return config_.resolution_m; }
   const LocalMapConfig& config() const { return config_; }
 
+  // Evidence recorded since the last call, in absolute cell indices. Empty unless
+  // `record_evidence` is set. Cells that leave the window keep their recorded evidence.
+  std::vector<CellDelta> take_evidence();
+
  private:
   size_t slot(const Index3& index) const;
   void clear_slab(int axis, int ring_coordinate);
   void update(const Index3& index, int delta);
+  Index3 index_of_slot(size_t slot) const;
+  void flush_pending();
 
   LocalMapConfig config_;
   Index3 dims_;
@@ -57,7 +66,14 @@ class LocalMap {
   bool placed_ = false;
   std::vector<int8_t> log_odds_;
   std::vector<uint8_t> observed_;
-  std::vector<size_t> frame_hits_;
+  grid::FrameTracer tracer_;
+  std::vector<int16_t> pending_;
+  // Per slot: 0 not touched since the last flush, else whether it was observed before.
+  static constexpr uint8_t kSeenBefore = 1;
+  static constexpr uint8_t kNewlyObserved = 2;
+  std::vector<uint8_t> pending_set_;
+  std::vector<size_t> pending_slots_;
+  std::vector<CellDelta> evidence_;
 };
 
 }  // namespace argus::node

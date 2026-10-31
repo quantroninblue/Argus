@@ -87,6 +87,8 @@ enum EventKind {
   EVENT_KIND_SENSOR_FAULT = 6;
   EVENT_KIND_LINK_STATE_CHANGED = 7;
   EVENT_KIND_PLAN_REJECTED = 8;
+  // The failsafe's own motion finished: leg done, home reached or at landing height.
+  EVENT_KIND_FAILSAFE_DONE = 9;
 }
 
 message Event {

@@ -19,7 +19,8 @@ final say on safety.
 
 ## Status
 
-Early development. Argo drives simulated robots; nothing has run on real hardware yet.
+Early development. Argus and Argo drive simulated robots end to end, including over a real
+network link; nothing has run on real hardware yet.
 
 What exists today:
 
@@ -35,12 +36,21 @@ What exists today:
   adapters for velocity and pose-setpoint controllers. It runs as a step API, so the same code
   is driven by the simulator now and by drivers on the robot later.
 - **Hub-node protocol** (`proto/`): protobuf messages for sessions, telemetry, events, mission
-  plans, map updates and stream control.
+  plans, map updates and stream control, carried over gRPC with mutual TLS. Robots always
+  open the connection.
+- **Argus** (`python/argus/hub/`): the hub. A registry of robots and their profiles, one
+  persistent site map per site built from every robot's evidence (`cpp/sitemap/`), a route
+  planner that works in each body's own configuration space, and a mission manager per robot
+  that keeps a short list of waypoints up to date and remembers branches that turned out to be
+  dead ends.
+- **Link handling on Argo**: heartbeats, link quality, a speed cap while the link is degraded,
+  and the profile's failsafe when it is lost (stop, hold, finish the current leg, return home
+  along its own trail, or land).
 - **Simulator** (`python/argus/sim/`): box worlds, ray-cast range sensors and a model of each
   control interface, plus a generator of random valid robot bodies. Collisions, limits and
   coverage are judged from simulator truth, not from Argo's own estimate.
 
-What Argo does today, tested on generated bodies of every drive type:
+What it does today, tested on generated bodies of every drive type:
 
 - Reaches waypoints that need a detour, on ground robots and multirotors.
 - Never commands speeds, accelerations or turns the body cannot do.
@@ -48,13 +58,17 @@ What Argo does today, tested on generated bodies of every drive type:
   never moves where no sensor covers, unless the profile allows a creep speed there.
 - Stops when sensor data goes stale or odometry fails, and refuses to move while the profile
   has unreviewed fields.
+- Reaches goals through the hub in worlds that need backtracking out of a dead end, a detour
+  that first leads away from the goal, or a new route when a gap is blocked mid-run.
+- When the link drops for longer than the profile allows, runs that profile's failsafe, and
+  carries on with the mission once the link is back.
 
 ## Roadmap
 
 1. Done: Argo running in a headless simulator: local map, local planner, safety supervisor,
    command adapters.
-2. Hub loop: sessions, site map, global planning and exploration with backtracking, tested
-   under network loss.
+2. Done: hub loop: sessions, site map, global planning and exploration with backtracking,
+   tested under network loss.
 3. Perception and language models on the hub, each with a smaller fallback.
 4. Setup tool for importing and calibrating a real robot, first hardware runs on the Axon.
 
@@ -64,12 +78,13 @@ Tested on Ubuntu 24.04.
 
 ```sh
 sudo apt install cmake g++ libeigen3-dev libyaml-cpp-dev libprotobuf-dev protobuf-compiler \
-    libgtest-dev pybind11-dev python3-dev python3-yaml python3-jsonschema python3-protobuf \
-    python3-numpy python3-pytest
+    libgrpc++-dev protobuf-compiler-grpc libgtest-dev pybind11-dev python3-dev python3-yaml \
+    python3-jsonschema python3-protobuf python3-grpcio python3-numpy python3-pytest openssl
 tools/check.sh
 ```
 
-`tools/check.sh` builds everything into `build/` and runs the C++ and Python tests.
+`tools/check.sh` builds everything into `build/` and runs the C++ and Python tests (a few
+minutes; some tests run over a real local network link in wall time).
 
 ## Trying the capability library
 
@@ -103,6 +118,25 @@ goal = [{"id": "goal", "position": (5.0, 2.0, 0.0), "tolerance_m": 0.4}]
 ep = run_episode(doc, world.wall_with_gap(), (0.0, 0.0, 0.0, 0.0), goal, 40.0)
 print("reached" if ep.complete else "did not reach", "the goal in", round(ep.time_s, 1), "s")
 print("collided:", ep.collided, "rule violations:", len(ep.violations))
+EOF
+```
+
+## Sending a simulated robot through the hub
+
+```sh
+export PYTHONPATH=python:build/python
+python3 - <<'EOF'
+from argus import profile
+from argus.sim import world
+from argus.sim.channel import LinkFaults
+from argus.sim.hub_episode import run_hub_episode
+
+doc = profile.load("schemas/examples/planar_omnidirectional.yaml")
+# The link stalls from 3 s to 9 s; this profile stops after 3 s without the hub.
+ep = run_hub_episode(doc, world.dead_end_branch(), (-5.0, 0.0, 0.0, 0.0), (5.0, 5.5, 0.0), 120.0,
+                     faults=LinkFaults(stalls=[(3.0, 9.0)]))
+print("reached" if ep.goal_reached else "did not reach", "the goal at", ep.reached_at_s, "s")
+print("failsafe:", [(round(e["stamp"], 1), e["kind"]) for e in ep.failsafe_events()])
 EOF
 ```
 

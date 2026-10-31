@@ -3,7 +3,11 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 
+#include <map>
+
+#include "argus/node/grpc_link.hpp"
 #include "argus/node/node.hpp"
+#include "argus/node/session.hpp"
 
 namespace py = pybind11;
 using namespace argus::node;
@@ -84,7 +88,8 @@ PYBIND11_MODULE(node, m) {
       .def_readwrite("resolution_m", &LocalMapConfig::resolution_m)
       .def_readwrite("half_width_m", &LocalMapConfig::half_width_m)
       .def_readwrite("z_below_m", &LocalMapConfig::z_below_m)
-      .def_readwrite("z_above_m", &LocalMapConfig::z_above_m);
+      .def_readwrite("z_above_m", &LocalMapConfig::z_above_m)
+      .def_readwrite("record_evidence", &LocalMapConfig::record_evidence);
 
   py::class_<RayPatternOptions>(m, "RayPatternOptions")
       .def(py::init<>())
@@ -118,7 +123,27 @@ PYBIND11_MODULE(node, m) {
       .def_readwrite("safety", &NodeConfig::safety)
       .def_readwrite("min_obstacle_height_m", &NodeConfig::min_obstacle_height_m)
       .def_readwrite("no_return_is_free", &NodeConfig::no_return_is_free)
-      .def_readwrite("no_progress_s", &NodeConfig::no_progress_s);
+      .def_readwrite("no_progress_s", &NodeConfig::no_progress_s)
+      .def_readwrite("dead_end_s", &NodeConfig::dead_end_s);
+
+  py::class_<LinkConfig>(m, "LinkConfig")
+      .def(py::init<>())
+      .def_readwrite("degraded_rtt_s", &LinkConfig::degraded_rtt_s)
+      .def_readwrite("degraded_loss", &LinkConfig::degraded_loss)
+      .def_readwrite("silent_heartbeats", &LinkConfig::silent_heartbeats)
+      .def_readwrite("recover_after_s", &LinkConfig::recover_after_s);
+
+  py::class_<SessionConfig>(m, "SessionConfig")
+      .def(py::init<>())
+      .def_readwrite("node_id", &SessionConfig::node_id)
+      .def_readwrite("software_version", &SessionConfig::software_version)
+      .def_readwrite("profile_hash", &SessionConfig::profile_hash)
+      .def_readwrite("calibration_version", &SessionConfig::calibration_version)
+      .def_readwrite("heartbeat_period_s", &SessionConfig::heartbeat_period_s)
+      .def_readwrite("telemetry_period_s", &SessionConfig::telemetry_period_s)
+      .def_readwrite("evidence_period_s", &SessionConfig::evidence_period_s)
+      .def_readwrite("degraded_speed_fraction", &SessionConfig::degraded_speed_fraction)
+      .def_readwrite("link", &SessionConfig::link);
 
   py::class_<Node>(m, "Node")
       .def(py::init([](const std::string& profile_text, const NodeConfig& config) {
@@ -202,5 +227,95 @@ PYBIND11_MODULE(node, m) {
       .def_property_readonly("profile_id", [](const Node& n) { return n.profile().id; })
       .def_property_readonly("control_interface", [](const Node& n) {
         return argus::capabilities::to_string(n.capabilities().control.interface);
-      });
+      })
+      .def_property_readonly("plan_generation", &Node::plan_generation)
+      .def_property_readonly("failsafe_active", &Node::failsafe_active)
+      .def_property_readonly("speed_cap", &Node::speed_cap)
+      .def("set_speed_cap", &Node::set_speed_cap, py::arg("mps"))
+      .def(
+          "enter_failsafe",
+          [](Node& n, const std::string& action, double now) {
+            using argus::capabilities::LinkLostAction;
+            static const std::map<std::string, LinkLostAction> actions = {
+                {"stop", LinkLostAction::Stop},
+                {"hold", LinkLostAction::Hold},
+                {"finish_leg_then_stop", LinkLostAction::FinishLegThenStop},
+                {"return_home", LinkLostAction::ReturnHome},
+                {"land", LinkLostAction::Land}};
+            const auto it = actions.find(action);
+            if (it == actions.end()) throw py::value_error("unknown failsafe action '" + action + "'");
+            n.enter_failsafe(it->second, now);
+          },
+          py::arg("action"), py::arg("now"))
+      .def("clear_failsafe", &Node::clear_failsafe, py::arg("now"))
+      .def("return_home", &Node::return_home, py::arg("now"))
+      .def("set_paused", &Node::set_paused, py::arg("paused"), py::arg("now"))
+      .def("breadcrumbs", [](const Node& n) { return n.breadcrumbs(); });
+
+  py::class_<GrpcLinkConfig>(m, "GrpcLinkConfig")
+      .def(py::init<>())
+      .def_readwrite("target", &GrpcLinkConfig::target)
+      .def_readwrite("ca_pem", &GrpcLinkConfig::ca_pem)
+      .def_readwrite("cert_pem", &GrpcLinkConfig::cert_pem)
+      .def_readwrite("key_pem", &GrpcLinkConfig::key_pem)
+      .def_readwrite("server_name", &GrpcLinkConfig::server_name)
+      .def_readwrite("connect_timeout_s", &GrpcLinkConfig::connect_timeout_s)
+      .def_readwrite("reconnect_period_s", &GrpcLinkConfig::reconnect_period_s);
+
+  // poll() returns {"transitions": [(connected, after), ...], "received": [bytes, ...]}, where
+  // `after` counts the received messages that came before that change of state.
+  py::class_<GrpcLink>(m, "GrpcLink")
+      .def(py::init<GrpcLinkConfig>(), py::arg("config"), py::call_guard<py::gil_scoped_release>())
+      .def(
+          "send",
+          [](GrpcLink& link, const py::list& messages) {
+            std::vector<std::string> out;
+            for (const auto& b : messages) out.push_back(b.cast<std::string>());
+            py::gil_scoped_release release;
+            link.send(out);
+          },
+          py::arg("messages"))
+      .def("poll",
+           [](GrpcLink& link) {
+             GrpcLink::Update u;
+             {
+               py::gil_scoped_release release;
+               u = link.poll();
+             }
+             py::list received;
+             for (const std::string& b : u.received) received.append(py::bytes(b));
+             py::list transitions;
+             for (const auto& t : u.transitions) transitions.append(py::make_tuple(t.connected, t.after));
+             py::dict d;
+             d["transitions"] = transitions;
+             d["received"] = received;
+             return d;
+           })
+      .def_property_readonly("connected", &GrpcLink::connected)
+      .def_property_readonly("streams_opened", &GrpcLink::streams_opened);
+
+  py::class_<Session>(m, "Session")
+      .def(py::init<Node&, SessionConfig>(), py::arg("node"), py::arg("config"), py::keep_alive<1, 2>())
+      .def("on_connected", &Session::on_connected, py::arg("now"))
+      .def("on_disconnected", &Session::on_disconnected, py::arg("now"))
+      .def(
+          "receive",
+          [](Session& s, const py::bytes& data, double now) { return s.receive(std::string(data), now); },
+          py::arg("data"), py::arg("now"))
+      .def(
+          "step", [](Session& s, double now) { return tick_dict(s.step(now)); }, py::arg("now"))
+      .def("take_outgoing",
+           [](Session& s) {
+             py::list out;
+             for (const std::string& b : s.take_outgoing()) out.append(py::bytes(b));
+             return out;
+           })
+      .def_property_readonly("connected", &Session::connected)
+      .def_property_readonly("accepted", &Session::accepted)
+      .def_property_readonly("rejected", &Session::rejected)
+      .def_property_readonly("reject_detail", &Session::reject_detail)
+      .def_property_readonly("link_state", [](const Session& s) { return to_string(s.link_state()); })
+      .def_property_readonly("round_trip_s", [](const Session& s) { return s.link().round_trip_s(); })
+      .def_property_readonly("map_epoch", &Session::map_epoch)
+      .def_property_readonly("evidence_bytes", &Session::evidence_bytes);
 }

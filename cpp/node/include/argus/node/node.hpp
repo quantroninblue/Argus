@@ -30,6 +30,11 @@ struct NodeConfig {
   double odometry_history_s = 2.0;
   // How long without getting closer to the waypoint before reporting it.
   double no_progress_s = 10.0;
+  // How long the local map must show no way to the waypoint before reporting a dead end.
+  double dead_end_s = 2.0;
+  // Spacing of the trail Argo keeps for returning home without the hub.
+  double breadcrumb_spacing_m = 0.5;
+  size_t max_breadcrumbs = 4000;
 };
 
 struct TickResult {
@@ -56,6 +61,26 @@ class Node {
   bool set_plan(const Plan& plan, double now);
   TickResult tick(double now);
 
+  // Hub requests. Cancelling with `return_home` sends Argo back along its own trail.
+  void cancel_plan(uint64_t generation, bool return_home, double now);
+  void set_paused(bool paused, double now);
+  void return_home(double now);
+
+  // Link handling, driven by the session layer. A speed cap of 0 means none.
+  void set_speed_cap(double mps) { speed_cap_ = mps; }
+  double speed_cap() const { return speed_cap_; }
+  // Runs `action` until cleared; hub plans are refused meanwhile.
+  void enter_failsafe(capabilities::LinkLostAction action, double now);
+  void clear_failsafe(double now);
+  bool failsafe_active() const { return failsafe_active_; }
+
+  uint64_t plan_generation() const { return mission_.generation(); }
+  bool has_odometry() const { return have_odom_; }
+  const Odometry& odometry() const { return odom_; }
+  // Local map evidence since the last call; empty unless NodeConfig::map.record_evidence.
+  std::vector<CellDelta> take_evidence() { return map_.take_evidence(); }
+  const std::vector<Vec3>& breadcrumbs() const { return crumbs_; }
+
   const capabilities::Profile& profile() const { return profile_; }
   const capabilities::Capabilities& capabilities() const { return caps_; }
   const LocalMap& map() const { return map_; }
@@ -79,6 +104,9 @@ class Node {
   bool pose_at(double stamp, Pose4& pose) const;
   const RangeSensor& range_sensor(const std::string& id) const;
   void watch_progress(const Waypoint* target, uint32_t flags, double now, std::vector<Event>& events);
+  void watch_dead_end(const Waypoint* target, double now, std::vector<Event>& events);
+  Plan home_plan() const;
+  Plan land_plan() const;
 
   capabilities::Profile profile_;
   capabilities::Capabilities caps_;
@@ -106,6 +134,15 @@ class Node {
   std::string progress_target_;
   double best_distance_ = 0.0;
   double last_progress_ = 0.0;
+  std::string dead_end_target_;
+  double exhausted_since_ = -1.0;
+  bool dead_end_reported_ = false;
+
+  double speed_cap_ = 0.0;
+  bool paused_ = false;
+  bool failsafe_active_ = false;
+  capabilities::LinkLostAction failsafe_action_ = capabilities::LinkLostAction::Stop;
+  std::vector<Vec3> crumbs_;
 };
 
 }  // namespace argus::node
