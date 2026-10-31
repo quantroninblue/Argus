@@ -37,6 +37,9 @@ struct SafetyConfig {
   // Share of the swept body that may be unobserved before the envelope counts as unknown.
   double max_unknown_fraction = 0.2;
   double envelope_spacing_m = 0.05;
+  // Longest stretch a body may creep through directions it cannot see before it has to move
+  // where it can again. Capped further at the body's own length.
+  double creep_distance_m = 0.5;
 };
 
 // Time of the latest frame from each range sensor, and how old a frame may get.
@@ -85,12 +88,20 @@ class SafetySupervisor {
   // sensors see every height band, allowing for frame age, the control period and latency.
   double sight_speed_limit(const Vec3& direction) const;
 
+  // Whether the profile lets the body creep where it cannot see, and how much of the current
+  // creep stretch is left. A body with no range sensor never creeps.
+  bool creep_allowed() const { return creep_allowed_; }
+  bool creep_available() const { return creep_allowed_ && creep_left_ > 0.0; }
+  double creep_left_m() const { return creep_left_; }
+  double creep_budget_m() const { return creep_budget_; }
+
   double lease_s() const { return lease_; }
   const Twist& last() const { return last_; }
 
  private:
   bool envelope_clear(const Twist& v, const SafetyInputs& in, bool occupied_only) const;
   Twist limit_acceleration(const Twist& v) const;
+  void track_creep(const Vec3& position);
   Twist gate(const Twist& v, const SafetyInputs& in, uint32_t& flags) const;
 
   const capabilities::Capabilities& caps_;
@@ -101,6 +112,12 @@ class SafetySupervisor {
   double lease_ = 0.3;
   std::map<std::string, double> sensor_max_age_;
   Twist last_;
+  bool creep_allowed_ = false;
+  double creep_budget_ = 0.0;
+  double creep_left_ = 0.0;
+  bool last_creep_ = false;
+  bool have_last_position_ = false;
+  Vec3 last_position_ = Vec3::Zero();
 };
 
 }  // namespace argus::node

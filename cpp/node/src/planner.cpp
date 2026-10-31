@@ -11,8 +11,9 @@ namespace {
 
 constexpr double kComfortMargin = 0.3;
 
-// Centre of the longest run of covered bearings, treating the bins as a circle. 0 (forward)
-// when nothing or everything is covered.
+// Centre of the longest run of covered bearings, treating the bins as a circle, preferring the
+// run that contains forward among equally long ones. 0 (forward) when nothing or everything is
+// covered.
 double widest_covered_bearing(const std::vector<const capabilities::CoverageBin*>& ring) {
   const int n = static_cast<int>(ring.size());
   auto covered = [&](int i) {
@@ -27,7 +28,8 @@ double widest_covered_bearing(const std::vector<const capabilities::CoverageBin*
     }
     int len = 0;
     while (len < n && covered(i + len)) ++len;
-    if (len > best_len) {
+    const bool has_forward = (n - i) % n < len;
+    if (len > best_len || (len == best_len && has_forward)) {
       best_len = len;
       best_start = i;
     }
@@ -87,7 +89,7 @@ LocalPlanner::LocalPlanner(const capabilities::Capabilities& caps, const BodyVol
   if (m.space == MotionSpace::Planar && !m.can_strafe) {
     const bool reverse = m.can_reverse && m.x.min_mps < 0.0;
     travel_bearing_ = !covered_at(0.0) && reverse && covered_at(M_PI) ? M_PI : 0.0;
-  } else if (!covered_at(0.0)) {
+  } else {
     travel_bearing_ = widest_covered_bearing(ring);
   }
 }
@@ -155,8 +157,13 @@ std::vector<Twist> LocalPlanner::candidates(const Odometry& odom, const Vec3& ca
   if (m.space == MotionSpace::Planar) {
     std::vector<double> xs = {0.0};
     for (double f : {1.0, 0.7, 0.45, 0.25, 0.1}) xs.push_back(f * m.x.max_mps);
+    // Reversing is offered slowly, unless the body travels backwards.
     if (m.can_reverse && m.x.min_mps < 0.0) {
-      for (double f : {0.3, 0.15}) xs.push_back(f * m.x.min_mps);
+      if (std::cos(travel_bearing_) < 0.0) {
+        for (double f : {1.0, 0.7, 0.45, 0.25, 0.1}) xs.push_back(f * m.x.min_mps);
+      } else {
+        for (double f : {0.3, 0.15}) xs.push_back(f * m.x.min_mps);
+      }
     }
     std::vector<double> ys = {0.0};
     if (m.can_strafe) {
@@ -202,10 +209,15 @@ std::vector<Twist> LocalPlanner::candidates(const Odometry& odom, const Vec3& ca
   const double el_offsets[] = {0.0, 0.5, -0.5};
   std::vector<Vec3> dirs = {Vec3::UnitZ(), -Vec3::UnitZ()};
   for (double dy : yaw_offsets) {
+    const double h = heading_to + dy;
     for (double de : el_offsets) {
-      const double h = heading_to + dy;
       const double e = std::clamp(el_to + de, -1.4, 1.4);
       dirs.emplace_back(std::cos(e) * std::cos(h), std::cos(e) * std::sin(h), std::sin(e));
+    }
+    // Level flight too: bodies with planar scanners may see nothing above or below the level
+    // row, and would otherwise have no covered direction while the carrot is higher or lower.
+    if (std::abs(el_to) > 0.05) {
+      dirs.emplace_back(std::cos(h), std::sin(h), 0.0);
     }
   }
   for (const Vec3& dir : dirs) {
@@ -236,7 +248,7 @@ std::vector<Twist> LocalPlanner::candidates(const Odometry& odom, const Vec3& ca
 }
 
 bool LocalPlanner::evaluate(const Twist& target, const Odometry& odom, const Vec3& carrot,
-                            double threshold, Rollout& out) const {
+                            double threshold, const LocalMap* contact_map, Rollout& out) const {
   const auto& m = caps_.motion;
   const double dt = config_.rollout_step_s;
   const int steps = static_cast<int>(std::ceil(config_.horizon_s / dt));
@@ -266,7 +278,8 @@ bool LocalPlanner::evaluate(const Twist& target, const Odometry& odom, const Vec
     vel = motion_.accelerate(vel, target, dt);
     pose = MotionModel::integrate(pose, vel, dt);
     const double clear = body_clearance(pose);
-    if (clear < threshold) {
+    if (clear < threshold &&
+        (!contact_map || body_.contact(*contact_map, pose, &odom.pose) == Contact::Occupied)) {
       return false;
     }
     min_clear = std::min(min_clear, clear);
@@ -314,13 +327,14 @@ Proposal LocalPlanner::plan(const LocalMap& map, const Waypoint& target,
   proposal.target_blocked = target_blocked_;
 
   const Vec3 aim = carrot(pose, target.position);
-  const double start = body_clearance(pose);
-  const double threshold = std::min(0.75 * ws_.resolution(), start - 0.01);
+  // Within a cell of an obstacle the distance field cannot tell a move that touches it from
+  // one that backs away, so rollouts there are judged by the supervisor's own contact test.
+  const double threshold = 0.75 * ws_.resolution();
+  const bool near = body_clearance(pose) < threshold;
 
   // Apply the supervisor's coverage rules before scoring, so a direction it would cap to creep
   // speed or refuse cannot win on paper.
-  const bool creep = caps_.failsafe.uncovered_motion == capabilities::UncoveredMotion::Creep &&
-                     caps_.failsafe.creep_speed_mps > 0.0;
+  const bool creep = supervisor.creep_available();
   std::vector<Rollout> rollouts;
   for (Twist t : candidates(in.odom, aim, target.speed_cap_mps)) {
     ++proposal.candidates;
@@ -337,7 +351,7 @@ Proposal LocalPlanner::plan(const LocalMap& map, const Waypoint& target,
       }
     }
     Rollout r;
-    if (evaluate(t, in.odom, aim, threshold, r)) {
+    if (evaluate(t, in.odom, aim, threshold, near ? &map : nullptr, r)) {
       rollouts.push_back(r);
     }
   }

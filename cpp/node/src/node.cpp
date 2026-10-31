@@ -427,6 +427,32 @@ TickResult Node::tick(double now) {
   const Waypoint* target = active;
   const SafetyInputs in{odom_, map_, clock_, now};
 
+  // Out of creep and still nothing it can see to drive on: go back to where the creep began.
+  // The planner turns the body so it sees the way back, which is space it has just crossed.
+  Waypoint retrace;
+  if (target) {
+    Vec3 left = creep_start_ - odom_.pose.position;
+    if (planar) {
+      left.z() = 0.0;
+    }
+    if (retracing_ && (target->id != retrace_for_ || left.norm() < 0.2 || supervisor_->creep_available())) {
+      retracing_ = false;
+    }
+    if (!retracing_ && supervisor_->creep_allowed() && !supervisor_->creep_available() &&
+        proposal_.has_target && proposal_.velocity.linear.norm() < 1e-6 && left.norm() >= 0.2) {
+      retracing_ = true;
+      retrace_for_ = target->id;
+    }
+    if (retracing_) {
+      retrace = *target;
+      retrace.position = creep_start_;
+      retrace.tolerance_m = 0.2;
+      target = &retrace;
+    }
+  } else {
+    retracing_ = false;
+  }
+
   if (!target) {
     proposal_ = Proposal{};
     proposal_.inputs_stamp = now;
@@ -436,6 +462,10 @@ TickResult Node::tick(double now) {
   }
 
   const SafetySupervisor::Verdict verdict = supervisor_->check(proposal_.velocity, proposal_.inputs_stamp, in);
+  if ((verdict.flags & kCreep) && !(last_flags_ & kCreep) &&
+      supervisor_->creep_left_m() >= supervisor_->creep_budget_m() - 1e-9) {
+    creep_start_ = odom_.pose.position;
+  }
   result.safety_flags = verdict.flags | (target ? 0u : static_cast<uint32_t>(kNoTarget));
   result.proposed = proposal_.velocity;
   result.proposal = proposal_;

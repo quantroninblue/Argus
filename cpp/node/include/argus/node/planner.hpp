@@ -58,8 +58,10 @@ class LocalPlanner {
   std::vector<Twist> candidates(const Odometry& odom, const Vec3& carrot, double speed_cap) const;
   // Smallest clearance between the body and any obstacle at `pose`.
   double body_clearance(const Pose4& pose) const;
+  // Rejects rollouts that come within `threshold` of an obstacle. With `contact_map` set, a
+  // pose that close is judged by the supervisor's contact test instead.
   bool evaluate(const Twist& target, const Odometry& odom, const Vec3& carrot, double threshold,
-                Rollout& out) const;
+                const LocalMap* contact_map, Rollout& out) const;
 
   const capabilities::Capabilities& caps_;
   const BodyVolume& body_;

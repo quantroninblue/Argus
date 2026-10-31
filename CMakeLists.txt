@@ -36,3 +36,10 @@ add_subdirectory(cpp/grid)
 add_subdirectory(cpp/capabilities)
 add_subdirectory(cpp/node)
 add_subdirectory(cpp/sitemap)
+add_subdirectory(cpp/argo)
+
+# Argo's ROS 2 driver and the argo executable, when a ROS 2 environment is sourced.
+find_package(rclcpp QUIET)
+if(rclcpp_FOUND)
+  add_subdirectory(ros/argo_ros)
+endif()

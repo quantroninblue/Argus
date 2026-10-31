@@ -7,10 +7,10 @@ from argus import profile as profiles
 from argus.hub import MissionState
 from argus.hub.exploration import PlaceStatus
 from argus.sim import world as worlds
-from argus.sim.episode import SimOptions
+from argus.sim.episode import SimOptions, run_episode
 from argus.sim.hub_episode import HubLoop, run_hub_episode
 from argus.sim.profile_gen import generate_profiles
-from argus.sim.sweep import run_sweep
+from argus.sim.sweep import run_sweep, scenario
 from test_episodes import _can_travel
 
 
@@ -98,14 +98,53 @@ def test_all_sensors_failing_stops_the_body_without_touching_memory():
 SWEEP = [d for d in generate_profiles(24, seed=0) if profiles.derive(d).safety_ready][:8]
 
 
-# Known issue: generated-0005 wedges against the wall's end after its return-home failsafe
-# and the local planner never offers the back-off that would free it. Strict, so a fix shows
-# up here.
-WEDGES = {"generated-0005"}
-
-
-@pytest.mark.parametrize("doc", [pytest.param(d, marks=pytest.mark.xfail(strict=True, reason="wedges near a wall end"))
-                                 if d["id"] in WEDGES else d for d in SWEEP], ids=lambda d: d["id"])
+@pytest.mark.parametrize("doc", SWEEP, ids=lambda d: d["id"])
 def test_random_link_loss_ends_in_each_bodys_failsafe(doc):
     (run,) = run_sweep([doc], seed=int(doc["id"][-4:]), can_travel=_can_travel)
     assert run.problems == [], (run.action, run.lost_after_s, run.stall)
+
+
+def _generated(seed, gid):
+    return next(d for d in generate_profiles(24, seed=seed) if d["id"] == gid)
+
+
+def test_body_seeing_only_one_side_reaches_the_goal_through_the_hub():
+    # Covered from straight ahead round to the right only. It used to drive nose first along
+    # the edge of what it sees and stop where the path turned left.
+    doc = _generated(1, "generated-0007")
+    world, start, goal = scenario(doc)
+    ep = run_hub_episode(doc, world, start, goal, 60.0)
+    _clean(ep)
+    assert ep.goal_reached
+
+
+def test_drone_seeing_only_level_keeps_a_covered_way_to_a_higher_goal():
+    # Two narrow side arcs at level only; below the goal height every sampled direction was
+    # uncovered until level flight was offered.
+    doc = _generated(1, "generated-0000")
+    world, start, goal = scenario(doc)
+    ep = run_episode(doc, world, start, [{"id": "goal", "position": goal, "tolerance_m": 0.4}], 60.0)
+    assert not ep.collided and ep.violations == []
+    assert ep.complete
+
+
+def test_body_that_sees_only_behind_reverses_at_its_full_speed():
+    doc = _generated(1, "generated-0014")
+    world, start, goal = scenario(doc)
+    ep = run_episode(doc, world, start, [{"id": "goal", "position": goal, "tolerance_m": 0.4}], 90.0)
+    assert not ep.collided and ep.violations == []
+    assert ep.complete
+    assert ep.max_speed_mps > 0.9 * -doc["motion"]["limits"]["x"]["velocity_mps"][0]
+
+
+@pytest.mark.parametrize("gid", ["generated-0008", "generated-0015"])
+def test_creep_is_short_and_a_body_with_no_range_sensor_never_drives(gid):
+    # Both may creep where they cannot see. 0008 has no range sensor at all; 0015's sensors
+    # miss the level it flies at. Both used to creep across the room into a box.
+    doc = next(d for d in generate_profiles(60, seed=0) if d["id"] == gid)
+    _, start, goal = scenario(doc)
+    world = worlds.clutter(7, keep_clear=[start[:2], goal[:2]])
+    ep = run_episode(doc, world, start, [{"id": "goal", "position": goal, "tolerance_m": 0.4}], 60.0)
+    assert not ep.collided and ep.violations == []
+    if gid == "generated-0008":
+        assert ep.distance_m < 0.05

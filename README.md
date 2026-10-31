@@ -69,8 +69,10 @@ What it does today, tested on generated bodies of every drive type:
    command adapters.
 2. Done: hub loop: sessions, site map, global planning and exploration with backtracking,
    tested under network loss.
-3. Perception and language models on the hub, each with a smaller fallback.
-4. Setup tool for importing and calibrating a real robot, first hardware runs on the Axon.
+3. Setup tool for importing and calibrating a real robot, the on-robot runtime with ROS 2
+   drivers, and first hardware runs on the Axon.
+4. Perception and language models on the hub, each with a smaller fallback.
+5. A graphical interface for the hub, a fuller command line, and polish for a first release.
 
 ## Building
 

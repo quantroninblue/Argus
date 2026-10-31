@@ -143,6 +143,11 @@ class Node {
   bool failsafe_active_ = false;
   capabilities::LinkLostAction failsafe_action_ = capabilities::LinkLostAction::Stop;
   std::vector<Vec3> crumbs_;
+  // Where the current creep stretch began, and the way back there once it ran out with
+  // nothing the body can see to drive on.
+  Vec3 creep_start_ = Vec3::Zero();
+  bool retracing_ = false;
+  std::string retrace_for_;
 };
 
 }  // namespace argus::node

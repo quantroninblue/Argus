@@ -84,6 +84,14 @@ SafetySupervisor::SafetySupervisor(const capabilities::Capabilities& caps, const
                                    const std::map<std::string, double>& sensor_max_age)
     : caps_(caps), body_(body), motion_(motion), config_(config), period_(control_period_s) {
   sensor_max_age_ = sensor_max_age;
+  bool sees = false;
+  for (const auto& b : caps.sensing.bins) {
+    sees = sees || b.full_height_reach_m > 0.0;
+  }
+  creep_allowed_ = sees && caps.failsafe.uncovered_motion == capabilities::UncoveredMotion::Creep &&
+                   caps.failsafe.creep_speed_mps > 0.0;
+  creep_budget_ = std::min(config_.creep_distance_m, 2.0 * body_.body_radius_m());
+  creep_left_ = creep_budget_;
   lease_ = config_.command_lease_s;
   if (lease_ <= 0.0) {
     const double timeout = caps.control.controller_timeout_s > 0.0 ? caps.control.controller_timeout_s : 0.3;
@@ -179,8 +187,7 @@ Twist SafetySupervisor::gate(const Twist& in_v, const SafetyInputs& in, uint32_t
         break;
       case Coverage::Uncovered:
         flags |= kUncovered;
-        if (caps_.failsafe.uncovered_motion == capabilities::UncoveredMotion::Creep &&
-            caps_.failsafe.creep_speed_mps > 0.0) {
+        if (creep_available()) {
           flags |= kCreep;
           occupied_only = true;
           if (speed > caps_.failsafe.creep_speed_mps) {
@@ -220,6 +227,21 @@ Twist SafetySupervisor::gate(const Twist& in_v, const SafetyInputs& in, uint32_t
   return v;
 }
 
+void SafetySupervisor::track_creep(const Vec3& position) {
+  // Distance moved since the last check is charged to the creep stretch if that command was a
+  // creep; any move in a covered direction starts a fresh stretch.
+  if (have_last_position_) {
+    const double moved = (position - last_position_).norm();
+    if (last_creep_) {
+      creep_left_ = std::max(0.0, creep_left_ - moved);
+    } else if (last_.linear.norm() > kMoving) {
+      creep_left_ = creep_budget_;
+    }
+  }
+  have_last_position_ = true;
+  last_position_ = position;
+}
+
 Twist SafetySupervisor::preview(const Twist& v, const SafetyInputs& in, uint32_t& flags) const {
   return gate(motion_.clamp(v), in, flags);
 }
@@ -244,8 +266,10 @@ SafetySupervisor::Verdict SafetySupervisor::check(const Twist& proposed, double 
   if (!in.odom.healthy || in.now - in.odom.stamp > config_.odometry_max_age_s) {
     verdict.flags |= kLocalization;
   }
+  track_creep(in.odom.pose.position);
   if (verdict.flags) {
     last_ = Twist{};
+    last_creep_ = false;
     return verdict;
   }
 
@@ -257,6 +281,7 @@ SafetySupervisor::Verdict SafetySupervisor::check(const Twist& proposed, double 
   }
   verdict.velocity = gate(limited, in, verdict.flags);
   last_ = verdict.velocity;
+  last_creep_ = (verdict.flags & kCreep) != 0 && last_.linear.norm() > kMoving;
   return verdict;
 }
 
