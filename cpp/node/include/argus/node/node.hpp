@@ -1,0 +1,111 @@
+#pragma once
+
+#include <deque>
+#include <map>
+#include <memory>
+#include <string>
+#include <vector>
+
+#include "argus/capabilities/capabilities.hpp"
+#include "argus/node/body.hpp"
+#include "argus/node/local_map.hpp"
+#include "argus/node/mission.hpp"
+#include "argus/node/motion.hpp"
+#include "argus/node/planner.hpp"
+#include "argus/node/ray_pattern.hpp"
+#include "argus/node/safety.hpp"
+
+namespace argus::node {
+
+struct NodeConfig {
+  // Window of the local map. Left at zero, it is sized from the body.
+  LocalMapConfig map{0.1, 0.0, 0.0, 0.0};
+  RayPatternOptions rays;
+  PlannerConfig planner;
+  SafetyConfig safety;
+  // Planar bodies: hits lower than this above the ground are the ground itself.
+  double min_obstacle_height_m = 0.05;
+  // Rays with no return clear the space up to the sensor's max range.
+  bool no_return_is_free = true;
+  double odometry_history_s = 2.0;
+  // How long without getting closer to the waypoint before reporting it.
+  double no_progress_s = 10.0;
+};
+
+struct TickResult {
+  Command command;
+  uint32_t safety_flags = 0;
+  Twist proposed;
+  Proposal proposal;
+  std::string target_id;
+  std::vector<Event> events;
+};
+
+// Argo's core: everything on the robot between drivers and the robot controller, as a
+// deterministic step API. Feed odometry and range frames as they arrive, hand it a plan, and
+// call tick() at the control rate.
+class Node {
+ public:
+  explicit Node(capabilities::Profile profile, NodeConfig config = {});
+  Node(const Node&) = delete;
+  Node& operator=(const Node&) = delete;
+
+  void on_odometry(const Odometry& odom);
+  // Returns false when the frame is dropped: unknown sensor, wrong size, or no pose for its time.
+  bool on_range_frame(const RangeFrame& frame);
+  bool set_plan(const Plan& plan, double now);
+  TickResult tick(double now);
+
+  const capabilities::Profile& profile() const { return profile_; }
+  const capabilities::Capabilities& capabilities() const { return caps_; }
+  const LocalMap& map() const { return map_; }
+  const std::vector<Vec3>& path() const { return planner_->path(); }
+  const RayPattern& ray_pattern(const std::string& sensor_id) const;
+  const std::vector<double>& self_hits(const std::string& sensor_id) const;
+  // Sensor pose in the base frame.
+  Eigen::Isometry3d sensor_mount(const std::string& sensor_id) const;
+  std::vector<std::string> range_sensor_ids() const;
+  double control_period_s() const { return control_period_; }
+  double command_lease_s() const { return supervisor_->lease_s(); }
+
+ private:
+  struct RangeSensor {
+    const capabilities::SensorSpec* spec = nullptr;
+    Eigen::Isometry3d mount = Eigen::Isometry3d::Identity();
+    RayPattern pattern;
+    std::vector<double> self_hits;
+  };
+
+  bool pose_at(double stamp, Pose4& pose) const;
+  const RangeSensor& range_sensor(const std::string& id) const;
+  void watch_progress(const Waypoint* target, uint32_t flags, double now, std::vector<Event>& events);
+
+  capabilities::Profile profile_;
+  capabilities::Capabilities caps_;
+  NodeConfig config_;
+  double control_period_ = 0.02;
+  double ground_z_ = 0.0;
+  LocalMap map_;
+  std::map<std::string, RangeSensor> sensors_;
+  SensorClock clock_;
+  std::deque<Odometry> history_;
+  Odometry odom_;
+  bool have_odom_ = false;
+
+  std::unique_ptr<BodyVolume> body_;
+  std::unique_ptr<MotionModel> motion_;
+  std::unique_ptr<SafetySupervisor> supervisor_;
+  std::unique_ptr<LocalPlanner> planner_;
+  Mission mission_;
+
+  Proposal proposal_;
+  double last_plan_time_ = -1e9;
+  std::vector<Event> pending_;
+  uint32_t last_flags_ = 0;
+
+  std::string progress_target_;
+  double best_distance_ = 0.0;
+  double last_progress_ = 0.0;
+};
+
+}  // namespace argus::node

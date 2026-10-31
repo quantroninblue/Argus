@@ -45,9 +45,11 @@ CollisionCapability derive_collision(const Profile& profile) {
     }
     c.bounding_radius_m = std::max(c.bounding_radius_m, shape_bounding_radius(shape));
   }
+  c.body_radius_m = c.bounding_radius_m;
   c.bounding_radius_m += c.padding_m;
 
   std::vector<Vec2> hull = convex_hull(projected);
+  c.body_footprint = hull;
   if (c.padding_m > 0.0) {
     std::vector<Vec2> padded;
     for (const Vec2& v : hull) {
@@ -128,8 +130,13 @@ std::vector<HeightBand> height_bands(const Profile& profile, const CollisionCapa
   const double low = options.min_obstacle_height_m;
   const double top = std::max(collision.aabb_max.z() - ground, low + options.band_height_m);
   std::vector<HeightBand> bands;
-  for (double h = low; h < top - 1e-9; h += options.band_height_m) {
-    bands.push_back({h, std::min(h + options.band_height_m, top)});
+  for (double h = low; h < top - 1e-9;) {
+    double high = h + options.band_height_m;
+    if (top - high < 0.5 * options.band_height_m) {
+      high = top;  // fold a thin remainder into the last band
+    }
+    bands.push_back({h, high});
+    h = high;
   }
   return bands;
 }
@@ -192,6 +199,7 @@ SensingCapability derive_planar_sensing(const Profile& profile,
 
     bool every_band = true;
     double full_from = 0.0;
+    double reach = kNever;
     for (size_t b = 0; b < sensing.bands.size(); ++b) {
       if (first[b] == kNever) {
         every_band = false;
@@ -201,9 +209,11 @@ SensingCapability derive_planar_sensing(const Profile& profile,
       bin.first_seen_m = std::min(bin.first_seen_m, first[b]);
       bin.max_seen_m = std::max(bin.max_seen_m, last[b]);
       full_from = std::max(full_from, first[b]);
+      reach = std::min(reach, last[b]);
     }
     if (every_band) {
       bin.full_height_from_m = full_from;
+      bin.full_height_reach_m = reach;
     }
     bin.sensors.assign(contributing.begin(), contributing.end());
     sensing.bins.push_back(bin);
@@ -240,6 +250,9 @@ SensingCapability derive_aerial_sensing(const CollisionCapability& collision,
         }
       }
       bin.full_height_from_m = bin.first_seen_m;
+      if (bin.seen()) {
+        bin.full_height_reach_m = bin.max_seen_m;
+      }
       bin.sensors.assign(contributing.begin(), contributing.end());
       sensing.bins.push_back(bin);
     }

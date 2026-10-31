@@ -89,9 +89,13 @@ TEST(Capabilities, DifferentialCoverageHasRearBlindSpot) {
   EXPECT_FALSE(bin_at(c.sensing, 180.0).seen());
   // Ahead, the downward camera fills in low obstacles the lidar plane misses.
   EXPECT_LT(bin_at(c.sensing, 0.0).full_height_from_m, kNever);
+  // Every band ahead stays in view out to somewhere inside the camera's 6 m range.
+  EXPECT_GT(bin_at(c.sensing, 0.0).full_height_reach_m, 1.0);
+  EXPECT_LE(bin_at(c.sensing, 0.0).full_height_reach_m, 6.0);
   // To the side only the lidar plane looks, so low obstacles stay unseen.
   const CoverageBin& side = bin_at(c.sensing, 90.0);
   EXPECT_EQ(side.full_height_from_m, kNever);
+  EXPECT_EQ(side.full_height_reach_m, 0.0);
   ASSERT_FALSE(side.unseen_bands.empty());
   EXPECT_NEAR(side.unseen_bands.front().low_m, 0.05, 1e-9);
   EXPECT_EQ(side.sensors, std::vector<std::string>{"front_lidar"});

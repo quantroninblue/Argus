@@ -84,6 +84,8 @@ PYBIND11_MODULE(capabilities, m) {
       .def_readonly("aabb_max", &CollisionCapability::aabb_max)
       .def_readonly("footprint", &CollisionCapability::footprint)
       .def_readonly("bounding_radius_m", &CollisionCapability::bounding_radius_m)
+      .def_readonly("body_footprint", &CollisionCapability::body_footprint)
+      .def_readonly("body_radius_m", &CollisionCapability::body_radius_m)
       .def_readonly("padding_m", &CollisionCapability::padding_m)
       .def("edge_distance_m", &CollisionCapability::edge_distance_m, py::arg("azimuth_rad"),
            py::arg("elevation_rad") = 0.0);
@@ -99,6 +101,7 @@ PYBIND11_MODULE(capabilities, m) {
       .def_readonly("first_seen_m", &CoverageBin::first_seen_m)
       .def_readonly("max_seen_m", &CoverageBin::max_seen_m)
       .def_readonly("full_height_from_m", &CoverageBin::full_height_from_m)
+      .def_readonly("full_height_reach_m", &CoverageBin::full_height_reach_m)
       .def_readonly("unseen_bands", &CoverageBin::unseen_bands)
       .def_readonly("sensors", &CoverageBin::sensors)
       .def_property_readonly("seen", &CoverageBin::seen);

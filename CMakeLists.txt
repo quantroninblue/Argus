@@ -32,3 +32,4 @@ endif()
 
 add_subdirectory(proto)
 add_subdirectory(cpp/capabilities)
+add_subdirectory(cpp/node)

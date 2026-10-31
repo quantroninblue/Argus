@@ -46,8 +46,12 @@ def test_generated_profiles_validate_and_derive(doc):
             assert b.sensors
             assert 0.0 <= b.first_seen_m <= b.max_seen_m <= caps.sensing.evaluation_range_m + 1e-9
             assert b.first_seen_m <= b.full_height_from_m
+            if math.isfinite(b.full_height_from_m):
+                assert 0.0 <= b.full_height_reach_m <= b.max_seen_m + 1e-9
+            else:
+                assert b.full_height_reach_m == 0.0
         else:
-            assert b.sensors == [] and math.isinf(b.first_seen_m)
+            assert b.sensors == [] and math.isinf(b.first_seen_m) and b.full_height_reach_m == 0.0
 
     range_kinds = {"range_2d", "range_3d", "depth"}
     if not any(s["kind"] in range_kinds for s in doc["sensors"]):

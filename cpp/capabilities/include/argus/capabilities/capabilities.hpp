@@ -50,6 +50,9 @@ struct CollisionCapability {
   std::vector<Vec2> footprint;
   // Radius around the base origin that contains the whole body including padding.
   double bounding_radius_m = 0.0;
+  // The same two without padding: the body itself.
+  std::vector<Vec2> body_footprint;
+  double body_radius_m = 0.0;
   double padding_m = 0.0;
   MotionSpace space = MotionSpace::Planar;
 
@@ -73,6 +76,10 @@ struct CoverageBin {
   double max_seen_m = 0.0;
   // Planar only: distance by which every height band has been seen at least once.
   double full_height_from_m = kNever;
+  // Farthest distance at which every height band is still seen (for aerial bodies, the
+  // farthest distance seen). An obstacle in this direction is noticed by this distance at the
+  // latest, so motion this way must be able to stop within it. 0 when some band is never seen.
+  double full_height_reach_m = 0.0;
   // Planar only: bands no sensor sees anywhere along this bearing.
   std::vector<HeightBand> unseen_bands;
   std::vector<std::string> sensors;
