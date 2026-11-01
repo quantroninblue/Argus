@@ -1,0 +1,27 @@
+name: CI
+
+on:
+  push:
+    branches: [main, m4]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends cmake g++ libeigen3-dev libyaml-cpp-dev \
+            libprotobuf-dev protobuf-compiler libgrpc++-dev protobuf-compiler-grpc libgtest-dev \
+            pybind11-dev python3-dev python3-yaml python3-jsonschema python3-protobuf python3-grpcio \
+            python3-numpy python3-pytest openssl
+      # Builds everything and runs the C++ and Python tests. Gazebo tests need ROS 2 and skip.
+      - name: Build and test
+        run: tools/check.sh
