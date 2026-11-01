@@ -13,10 +13,27 @@ class World:
     # One row per box: min x, min y, min z, max x, max y, max z.
     boxes: np.ndarray = field(default_factory=lambda: np.zeros((0, 6)))
     name: str = "empty"
+    # Boxes that walk a path (argus.sim.movers.Mover); `boxes` never move.
+    movers: list = field(default_factory=list)
 
     def add(self, lo, hi) -> "World":
         self.boxes = np.vstack([self.boxes, np.asarray([*lo, *hi], dtype=float)])
         return self
+
+    def add_mover(self, mover) -> "World":
+        self.movers.append(mover)
+        return self
+
+    def moving_at(self, t: float) -> "World":
+        """Only the movers, where they are at time `t`."""
+        boxes = np.array([m.box(t) for m in self.movers]) if self.movers else np.zeros((0, 6))
+        return World(boxes=boxes, name=self.name)
+
+    def at(self, t: float) -> "World":
+        """Everything, movers where they are at time `t`, for ray casting."""
+        if not self.movers:
+            return self
+        return World(boxes=np.vstack([self.boxes, self.moving_at(t).boxes]), name=self.name)
 
     def raycast(self, origin: np.ndarray, dirs: np.ndarray, max_range: float) -> np.ndarray:
         """Distance along each unit direction to the first box face or the floor; inf if none."""

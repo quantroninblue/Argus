@@ -36,6 +36,7 @@ from argus.sim.grpc_episode import _Background
 from argus.sim.world import World
 
 from .procs import reaping, start_process, stop_process
+from .world import mover_name
 from .robot import isolated_env, start_robot
 from .runlog import RosRecorder, write_run_log
 
@@ -55,8 +56,34 @@ class GazeboEpisode:
     time_s: float = 0.0
     workdir: str = ""
     trace: list = field(default_factory=list)  # (t, x, y, z, yaw) from the true pose
+    # Moving obstacles that came into contact: {"t", "with", "robot_speed_mps", "at_rest"}; a
+    # contact with the robot moving also sets `collided` (passive motion safety, as headless).
+    contacts: list = field(default_factory=list)
     log_dir: str = ""  # the run log (see runlog.py), inside the store when one was given
     run_id: str | None = None  # the run's id in the store
+
+
+class _Movers:
+    """Puts each moving obstacle where its path says at the current simulated time, through
+    Gazebo's set_pose service (UserCommands)."""
+
+    def __init__(self, world: World) -> None:
+        from gz.msgs10.boolean_pb2 import Boolean
+        from gz.msgs10.pose_pb2 import Pose
+        from gz.transport13 import Node
+
+        self.world = world
+        self.node = Node()
+        self.service = f"/world/{world.name}/set_pose"
+        self._pose, self._reply = Pose, Boolean
+
+    def place(self, t: float) -> None:
+        for i, m in enumerate(self.world.movers):
+            b = m.box(t)
+            req = self._pose(name=mover_name(i))
+            req.position.x, req.position.y, req.position.z = (b[0] + b[3]) / 2, (b[1] + b[4]) / 2, (b[2] + b[5]) / 2
+            req.orientation.w = 1.0
+            self.node.request(self.service, req, self._pose, self._reply, 200)
 
 
 class _Watcher:
@@ -87,6 +114,20 @@ class _Watcher:
         self.executor.shutdown()
         self.thread.join(5.0)
         self.node.destroy_node()
+
+
+def _judge_movers(world: World, judge, pos, yaw, t, speed, at_rest, touching, out) -> None:
+    """The headless rule (argus.sim.episode.Simulation._judge_movers) on Gazebo's true poses."""
+    for i, m in enumerate(world.movers):
+        if not judge.collides(World(boxes=m.box(t)[None, :], name=world.name), pos, yaw):
+            touching.pop(i, None)
+            continue
+        before = touching.get(i)
+        if before is None or (not at_rest and before == "rest"):
+            out.contacts.append({"t": t, "with": m.name, "robot_speed_mps": speed, "at_rest": at_rest})
+        if not at_rest:
+            out.collided = True
+        touching[i] = "rest" if at_rest else "moving"
 
 
 def run_gazebo_episode(doc: dict, world: World, start, goal, duration_s: float, tolerance_m: float = 0.4,
@@ -155,6 +196,8 @@ def _run(doc, world, start, goal, duration_s, tolerance_m, gui, work: Path, made
                                     "-p", "use_sim_time:=true"], work / "argo.log", env))
 
         judge = _Judge(profiles.derive(doc), doc, 0.02)
+        movers = _Movers(world) if world.movers else None
+        touching: dict[int, str] = {}
         wall_limit = time.monotonic() + 3 * duration_s + 60.0
         goal_set = False
         last = None
@@ -163,13 +206,20 @@ def _run(doc, world, start, goal, duration_s, tolerance_m, gui, work: Path, made
             time.sleep(0.02)
             if not robot.alive() or any(p.poll() is not None for p in procs):
                 raise RuntimeError(f"a process exited early; logs in {work}")
+            if movers is not None:
+                movers.place(watcher.now)
             with watcher.lock:
                 pose = watcher.pose
             if pose is None or pose == last:
                 continue
-            last = pose
+            previous, last = last, pose
             t, x, y, z, yaw = pose
             out.trace.append(pose)
+            if movers is not None and previous is not None and t > previous[0]:
+                dt = t - previous[0]
+                speed = float(np.linalg.norm(np.subtract(pose[1:4], previous[1:4]))) / dt
+                at_rest = speed < 0.01 and abs((yaw - previous[4] + np.pi) % (2 * np.pi) - np.pi) / dt < 0.01
+                _judge_movers(world, judge, np.array([x, y, z]), yaw, t, speed, at_rest, touching, out)
             if judge.collides(world, np.array([x, y, z]), yaw):
                 if not in_contact:
                     out.collisions.append({"t_s": t, "until_s": t, "pose": [x, y, yaw]})

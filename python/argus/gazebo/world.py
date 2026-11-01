@@ -20,6 +20,8 @@ def world_sdf(world: World, models: list[str], step_s: float = 0.001) -> str:
         boxes.append(f'<model name="box_{i}"><static>true</static><pose>{centre} 0 0 0</pose>'
                      f'<link name="link"><collision name="c">{geo}</collision>'
                      f'<visual name="v">{geo}</visual></link></model>')
+    for i, m in enumerate(world.movers):
+        boxes.append(mover_sdf(i, m))
     floor = ('<model name="floor"><static>true</static><link name="link"><collision name="c">'
              "<geometry><plane><normal>0 0 1</normal><size>100 100</size></plane></geometry>"
              "<surface><friction><ode><mu>1.0</mu><mu2>1.0</mu2></ode></friction></surface></collision>"
@@ -38,6 +40,24 @@ def world_sdf(world: World, models: list[str], step_s: float = 0.001) -> str:
             '<light type="directional" name="sun"><pose>0 0 10 0 0 0</pose><direction>-0.5 0.1 -0.9</direction>'
             "</light>"
             + floor + "".join(boxes) + "".join(models) + "</world></sdf>")
+
+
+def mover_name(i: int) -> str:
+    return f"mover_{i}"
+
+
+def mover_sdf(i: int, mover) -> str:
+    """A moving obstacle as Gazebo sees it: a static box with a visual and no collision, placed
+    on its path every step by the runner (`set_pose`). Gazebo's lidar and depth sensors render
+    it, so the robot sees it; it never pushes the robot, and contact is judged from the true
+    poses, as in the headless simulator."""
+    b = mover.box(0.0)
+    size = " ".join(f"{b[k + 3] - b[k]:.6g}" for k in range(3))
+    centre = " ".join(f"{(b[k + 3] + b[k]) / 2:.6g}" for k in range(3))
+    return (f'<model name="{mover_name(i)}"><static>true</static><pose>{centre} 0 0 0</pose><link name="link">'
+            f'<visual name="v"><geometry><box><size>{size}</size></box></geometry>'
+            "<material><ambient>0.9 0.45 0.1 1</ambient><diffuse>0.9 0.45 0.1 1</diffuse></material>"
+            "</visual></link></model>")
 
 
 def bridge_entries(doc: dict, topics: Topics, command_topic: str | None = None) -> list[tuple[str, str, str, str, str]]:

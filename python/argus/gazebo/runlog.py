@@ -163,11 +163,15 @@ def write_run_log(log_dir: Path, work: Path, *, doc: dict, world, model: str, to
 
     run = {
         "body": {"id": doc.get("id"), "name": doc.get("name"), "drivetrain": topics.drive},
-        "world": {"name": world.name, "boxes": [[round(float(v), 4) for v in b] for b in world.boxes]},
+        "world": {"name": world.name, "boxes": [[round(float(v), 4) for v in b] for b in world.boxes],
+                  "movers": [{"name": m.name, "path": [list(pt) for pt in m.path], "speed_mps": m.speed_mps,
+                              "size_m": list(m.size), "start_s": m.start_s, "back_and_forth": m.back_and_forth}
+                             for m in world.movers]},
         "start": list(start), "goal": list(goal), "tolerance_m": tolerance_m,
         "outcome": {"goal_reached": episode.goal_reached, "reached_at_s": episode.reached_at_s,
                     "mission_state": episode.mission_state, "collided": episode.collided,
-                    "collisions": episode.collisions, "final_pose": list(episode.final_pose),
+                    "collisions": episode.collisions, "contacts": episode.contacts,
+                    "final_pose": list(episode.final_pose),
                     "simulated_s": episode.time_s},
         "topics": topic_summary,
         "argo": _argo_counts(work / "argo.log"),

@@ -57,6 +57,10 @@ class Episode:
     max_speed_mps: float = 0.0
     # How many ticks each safety flag was raised.
     flag_counts: dict[str, int] = field(default_factory=dict)
+    # Each time a moving obstacle came into contact: {"t", "with", "robot_speed_mps", "at_rest"}.
+    # Contact while the robot moves sets `collided`; a mover walking into a robot already at
+    # rest does not (passive motion safety, Fraichard 2007).
+    contacts: list[dict[str, Any]] = field(default_factory=list)
     trace: list[dict[str, Any]] = field(default_factory=list)
 
 
@@ -299,6 +303,24 @@ class Simulation:
         self._next_odom = 0.0
         self._next_tick = 0.0
         self._odom_yaw = self.plant.yaw
+        self._touch: dict[int, str] = {}  # mover index -> rest or moving, while in contact
+
+    def _judge_movers(self, t: float) -> None:
+        """A contact is recorded when it starts, and again if the robot starts moving while
+        still touching; any step of contact with the robot moving is a collision."""
+        plant, result = self.plant, self.result
+        for i, m in enumerate(self.world.movers):
+            alone = type(self.world)(boxes=m.box(t)[None, :], name=self.world.name)
+            if not self.judge.collides(alone, plant.pos, plant.yaw):
+                self._touch.pop(i, None)
+                continue
+            moving = not self.at_rest
+            before = self._touch.get(i)
+            if before is None or (moving and before == "rest"):
+                result.contacts.append({"t": t, "with": m.name, "robot_speed_mps": self.speed, "at_rest": not moving})
+            if moving:
+                result.collided = True
+            self._touch[i] = "moving" if moving else "rest"
 
     @property
     def t(self) -> float:
@@ -330,7 +352,7 @@ class Simulation:
                 s.next += s.period
                 failed = s.id in o.sensor_fails_at_s and t >= o.sensor_fails_at_s[s.id]
                 if not failed and (o.sensors_stop_at_s is None or t < o.sensors_stop_at_s):
-                    node.on_range_frame(t, s.id, s.frame(self.world, plant.pos, plant.yaw, o.range_noise_m))
+                    node.on_range_frame(t, s.id, s.frame(self.world.at(t), plant.pos, plant.yaw, o.range_noise_m))
         out = None
         if t >= self._next_tick - EPS:
             out = tick(t)
@@ -356,6 +378,8 @@ class Simulation:
         result.max_speed_mps = max(result.max_speed_mps, self.speed)
         if self.judge.collides(self.world, plant.pos, plant.yaw):
             result.collided = True
+        if self.world.movers:
+            self._judge_movers(t)
         if t >= self.fault_at and result.rest_after_fault_s is None and self.at_rest:
             result.rest_after_fault_s = t
         result.time_s = t

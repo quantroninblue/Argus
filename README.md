@@ -185,6 +185,24 @@ print("collided:", ep.collided, "rule violations:", len(ep.violations))
 EOF
 ```
 
+Worlds can hold moving obstacles too: boxes the size of a person (or anything else) that
+walk a path at a set speed, once or back and forth, and never give way. Whether a world has
+any is up to you; leave them out for an empty or still world.
+
+```python
+from argus.sim.movers import Mover, crossing
+
+w = world.open_room()
+w.add_mover(crossing((3.0, 0.0), 0.0, 2.5, start_s=3.0))          # someone crossing 3 m ahead
+w.add_mover(Mover(path=[(6.5, 0.0), (-6.0, 0.0)], speed_mps=0.5))  # someone walking toward it
+ep = run_episode(doc, w, (0.0, 0.0, 0.0, 0.0), goal, 30.0)
+print(ep.collided, ep.contacts)
+```
+
+A contact counts against the robot only if it was still moving: someone walking into a robot
+that has already stopped is recorded in `ep.contacts` but is not a collision. The same movers
+run in Gazebo, where the robot's sensors see them.
+
 ## Sending a simulated robot through the hub
 
 ```sh

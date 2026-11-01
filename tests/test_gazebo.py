@@ -216,3 +216,21 @@ def test_quadcopter_flies_through_the_pillars_without_touching_one(tmp_path):
                             workdir=str(tmp_path))
     assert not ep.collided, ep.final_pose
     assert ep.goal_reached, (ep.mission_state, ep.final_pose, ep.time_s)
+
+
+# 2026-11-01, before N2: the robot sees the person (the hub replans, Argo slows and blocks)
+# but steps aside from where they are, not where they are going, and is caught turning.
+@pytest.mark.xfail(strict=True, reason="Argo treats obstacles as still; hub plan item N2")
+def test_a_person_walking_toward_the_robot_is_seen_and_never_hit(tmp_path):
+    from argus.sim.movers import Mover
+
+    # Headless, today's Argo gets out of the way at this speed (test_moving_obstacles.py); in
+    # Gazebo, with real drive dynamics, it does not.
+    world = worlds.open_room().add_mover(Mover(path=[(6.5, 0.0), (-6.0, 0.0)], speed_mps=0.5,
+                                               name="oncoming person"))
+    ep = run_gazebo_episode(_example("planar_differential"), world, (0.0, 0.0, 0.0, 0.0), (6.0, 0.0, 0.0), 90.0,
+                            workdir=str(tmp_path))
+    assert not ep.collided, (ep.contacts, ep.collisions)
+    assert ep.goal_reached, (ep.mission_state, ep.final_pose, ep.time_s)
+    run = json.loads((Path(ep.log_dir) / "run.json").read_text())
+    assert run["world"]["movers"][0]["name"] == "oncoming person"
