@@ -5,6 +5,11 @@ target_include_directories(argo_runtime PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/inclu
 target_link_libraries(argo_runtime PUBLIC argus_node_session argus_node_grpc yaml-cpp::yaml-cpp)
 target_compile_options(argo_runtime PRIVATE -Wall -Wextra -Wpedantic)
 
+# Timing of the core on this machine against its budgets (see src/bench.cpp).
+add_executable(argo_bench src/bench.cpp)
+target_link_libraries(argo_bench PRIVATE argus_node)
+target_compile_options(argo_bench PRIVATE -Wall -Wextra -Wpedantic)
+
 if(ARGUS_BUILD_TESTS)
   add_executable(argo_runtime_tests tests/test_runtime.cpp)
   target_link_libraries(argo_runtime_tests PRIVATE argo_runtime GTest::gtest_main)
