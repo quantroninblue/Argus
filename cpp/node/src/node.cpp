@@ -341,6 +341,53 @@ void Node::cancel_plan(uint64_t generation, bool home, double now) {
 
 void Node::set_paused(bool paused, double) { paused_ = paused; }
 
+bool Node::clear_line(const Vec3& a, const Vec3& b) const {
+  Vec3 d = b - a;
+  const bool planar = caps_.motion.space == MotionSpace::Planar;
+  if (planar) {
+    d.z() = 0.0;
+  }
+  const double len = d.norm();
+  const double yaw = len > 1e-6 ? std::atan2(d.y(), d.x()) : odom_.pose.yaw;
+  const int steps = std::max(1, static_cast<int>(std::ceil(len / map_.resolution())));
+  for (int k = 0; k <= steps; ++k) {
+    Pose4 p;
+    p.position = a + (b - a) * (static_cast<double>(k) / steps);
+    if (planar) {
+      p.position.z() = odom_.pose.position.z();
+    }
+    p.yaw = yaw;
+    if (body_->contact(map_, p, &odom_.pose) != Contact::Free) {
+      return false;
+    }
+  }
+  return true;
+}
+
+std::vector<Vec3> Node::shortcut(const std::vector<Vec3>& trail) const {
+  // String pulling: from each kept point, go straight to the farthest of the next few points
+  // the padded body can reach in a line through space it has seen free. Where the local map
+  // does not know the space (outside it, or never seen), the trail is kept as walked.
+  constexpr size_t kLookahead = 20;
+  if (trail.size() < 3) {
+    return trail;
+  }
+  std::vector<Vec3> out{trail.front()};
+  size_t i = 0;
+  while (i + 1 < trail.size()) {
+    size_t next = i + 1;
+    for (size_t j = std::min(trail.size() - 1, i + kLookahead); j > i + 1; --j) {
+      if (clear_line(trail[i], trail[j])) {
+        next = j;
+        break;
+      }
+    }
+    out.push_back(trail[next]);
+    i = next;
+  }
+  return out;
+}
+
 Plan Node::home_plan() const {
   Plan plan;
   plan.generation = mission_.generation();
@@ -367,6 +414,7 @@ Plan Node::home_plan() const {
     }
   }
   back.push_back(crumbs_.front());
+  back = shortcut(back);
   double since = 0.0;
   for (size_t i = 1; i < back.size(); ++i) {
     since += (back[i] - back[i - 1]).norm();

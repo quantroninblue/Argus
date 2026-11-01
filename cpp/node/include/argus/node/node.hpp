@@ -117,6 +117,8 @@ class Node {
   void watch_progress(const Waypoint* target, uint32_t flags, double now, std::vector<Event>& events);
   void watch_dead_end(const Waypoint* target, double now, std::vector<Event>& events);
   Plan home_plan() const;
+  bool clear_line(const Vec3& a, const Vec3& b) const;
+  std::vector<Vec3> shortcut(const std::vector<Vec3>& trail) const;
   Plan land_plan() const;
 
   capabilities::Profile profile_;

@@ -218,9 +218,9 @@ Twist SafetySupervisor::gate(const Twist& in_v, const SafetyInputs& in, uint32_t
     v = motion_.clamp(v);
   }
 
-  // Turning in place: the sweep must not reach a known obstacle. Unobserved space is accepted
-  // here because the body stays where it is.
-  if (v.yaw_rate != 0.0 && body_.planar() && !envelope_clear(v, in, true)) {
+  // Turning in place: the corners sweep space too, so the same rule as for moving holds: no
+  // known obstacle, and no space no sensor has looked at (creep keeps its occupied-only check).
+  if (v.yaw_rate != 0.0 && body_.planar() && !envelope_clear(v, in, occupied_only)) {
     flags |= kBlocked;
     v.yaw_rate = 0.0;
   }

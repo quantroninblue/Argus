@@ -71,3 +71,7 @@ sensors:
 compute:
   board: vicharak_axon
   accelerator: rk3588_npu
+
+# Start the robot with this much clear space around it (see the setup report).
+assumptions:
+  clear_at_start_m: 0.5

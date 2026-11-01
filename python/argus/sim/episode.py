@@ -96,6 +96,9 @@ class Plant:
         self.yaw = float(start[3])
         self.vel = np.zeros(3)
         self.w = 0.0
+        # The yaw rate the drive is working toward; with a turn mismatch the body achieves only
+        # a share of it. Kept apart from `w` so the share is applied once, not every step.
+        self.w_drive = 0.0
         self.queue: deque = deque()
         self.cmd: dict | None = None
         self.applied_at = -math.inf
@@ -130,13 +133,14 @@ class Plant:
         axes = (m.x, m.y, m.z)
         self.vel = np.array([_approach(self.vel[i], lin[i], axes[i].accel_mps2, axes[i].decel_mps2, dt)
                              for i in range(3)])
-        self.w = _approach(self.w, w, m.yaw_accel_radps2, m.yaw_accel_radps2, dt)
+        self.w_drive = _approach(self.w_drive, w, m.yaw_accel_radps2, m.yaw_accel_radps2, dt)
+        self.w = self.w_drive
         if m.space == "planar":
             self.vel[2] = 0.0
             if not m.can_strafe:
                 self.vel[1] = 0.0
             if m.min_turn_radius_m > 0.0:
-                self.w /= self.turn_scale
+                self.w = self.w_drive / self.turn_scale
                 limit = abs(self.vel[0]) / (m.min_turn_radius_m * self.turn_scale)
                 self.w = max(-limit, min(limit, self.w))
         mid = self.yaw + 0.5 * self.w * dt
