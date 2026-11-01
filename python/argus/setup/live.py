@@ -180,28 +180,12 @@ def _topic_checks(probe: _Probe, doc: dict, duration_s: float, result: LiveResul
     return stats
 
 
-def _clear_ahead(probe: _Probe, doc: dict, stats: dict) -> float | None:
-    """Nearest return within 20 degrees of forward on any 2D scan, or None without one."""
-    best = None
-    for topic, st in stats.items():
-        if st["spec"]["kind"] != "range_2d":
-            continue
-        got = []
-        sub = probe.node.create_subscription(get_message("sensor_msgs/msg/LaserScan"), topic, got.append,
-                                             qos_profile_sensor_data)
-        _wait(probe, 0.5)
-        probe.node.destroy_subscription(sub)
-        if not got:
-            continue
-        scan = got[-1]
-        frame = doc["geometry"].get("frames", {}).get(st["spec"]["frame"], {})
-        mount_yaw = frame.get("rpy_rad", [0, 0, 0])[2]
-        for i, r in enumerate(scan.ranges):
-            a = mount_yaw + scan.angle_min + i * scan.angle_increment
-            if abs(math.remainder(a, 2 * math.pi)) <= math.radians(20) and scan.range_min <= r <= scan.range_max:
-                best = r if best is None else min(best, r)
-        best = best if best is not None else scan.range_max
-    return best
+def _clear_ahead(probe: _Probe, doc: dict, stats: dict | None = None) -> float | None:
+    """Room ahead of the body's front from any range sensor (scan, point cloud or depth), or
+    None when no sensor looks forward."""
+    from .clearance import room, snapshot
+
+    return room(doc, snapshot(probe, doc), 0.0)
 
 
 def _timeout_check(probe: _Probe, doc: dict, wheels_up: bool, stats: dict, result: LiveResult,
@@ -219,8 +203,8 @@ def _timeout_check(probe: _Probe, doc: dict, wheels_up: bool, stats: dict, resul
     if not wheels_up:
         clear = _clear_ahead(probe, doc, stats)
         if clear is None:
-            result.checks.append(Check("controller timeout", False, "not run: no 2D scan to confirm space "
-                                       "ahead; lift the drive wheels and pass --wheels-up"))
+            result.checks.append(Check("controller timeout", False, "not run: no range sensor looks ahead to "
+                                       "confirm space; lift the drive wheels and pass --wheels-up"))
             return
         if clear < CLEAR_AHEAD_M:
             result.checks.append(Check("controller timeout", False, f"not run: only {clear:.2f} m clear ahead, "

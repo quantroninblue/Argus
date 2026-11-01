@@ -116,15 +116,16 @@ def test_setup_check_passes_on_a_simulated_robot_and_catches_a_missing_timeout(t
     assert not timeout_check.ok and "no timeout" in timeout_check.detail, bad.text()
 
 
-def _calibrate_in_gazebo(true_doc, declared_doc, work):
+def _calibrate_in_gazebo(true_doc, declared_doc, work, odom_scale=1.0, start=(-5.0, 0.0, 0.0, 0.0)):
     import rclpy
 
     from argus.gazebo.robot import isolated_env, start_argo_setup, start_robot, stop_process
     from argus.setup.calibrate import calibrate
 
+    work.mkdir(parents=True, exist_ok=True)
     env = isolated_env()
     rclpy.init()
-    robot = start_robot(true_doc, worlds.open_room(), (-5.0, 0.0, 0.0, 0.0), work, env)
+    robot = start_robot(true_doc, worlds.open_room(), start, work, env, odom_scale=odom_scale)
     argo = start_argo_setup(declared_doc, work, env, str(ARGO))
     try:
         return calibrate(declared_doc, sim_time=True)
@@ -182,3 +183,19 @@ def test_argo_refuses_a_setup_motion_into_a_wall(tmp_path):
     check = next(c for c in result.checks if c.name == "controller timeout")
     assert not check.ok and "supervisor" in check.detail, result.text()
 
+
+
+def test_calibration_measures_every_axis_and_catches_wrong_odometry(tmp_path):
+    # A mecanum base with scanners front and rear sees its sides at every height; the
+    # omnidirectional example does not (its top scanner misses low obstacles beside it).
+    omni = profiles.load(Path(__file__).parent / "bodies" / "mecanum_class.yaml")
+    cal = _calibrate_in_gazebo(omni, omni, tmp_path / "omni", start=(0.0, 0.0, 0.0, 0.0))
+    assert cal.problems == [], cal.text()
+    names = " ".join(m.field for m in cal.measurements)
+    assert "(forward)" in names and "(backward)" in names and ("(left)" in names or "(right)" in names), cal.text()
+    scale = next(m for m in cal.measurements if m.field == "odometry scale")
+    assert abs(scale.measured - 1.0) < 0.05, cal.text()
+
+    diff = _example("planar_differential")
+    cal = _calibrate_in_gazebo(diff, diff, tmp_path / "diff", odom_scale=1.1)
+    assert any("odometry reports" in p and "more" in p for p in cal.problems), cal.text()

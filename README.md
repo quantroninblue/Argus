@@ -50,7 +50,10 @@ What exists today:
   control interface, plus a generator of random valid robot bodies. Collisions, limits and
   coverage are judged from simulator truth, not from Argo's own estimate.
 
-What it does today, tested on generated bodies of every drive type:
+What it does today, tested on robots modelled on common platforms (`tests/bodies/`: TurtleBot3
+and TurtleBot4 class, Jackal and Husky class skid-steer bases, a 1:10 scale car, a mecanum base
+and an X500 class quadcopter), which must reach their goals, and on randomly generated bodies
+of every drive type, which must stay safe:
 
 - Reaches waypoints that need a detour, on ground robots and multirotors.
 - Never commands speeds, accelerations or turns the body cannot do.
@@ -146,11 +149,20 @@ argo --config argo.yaml --setup        # on the robot
 python3 -m argus setup check profile.yaml --motion
 ```
 
-`setup calibrate` then measures command latency, acceleration, top speed, braking, and the
-yaw rate or, for a car-like robot, the real turning radius, by stepped motion tests watched
-through odometry. It checks the scan for room before each run. Measured values replace
-declared ones only where they are worse (slower, weaker braking, wider turns, more latency),
-and are marked `calibrated` in the profile.
+`setup calibrate` then measures command latency, acceleration, top speed and braking on
+every axis the robot moves along (forward, backward if it may reverse, sideways if it can
+strafe), and the yaw rate or, for a car-like robot, the real turning radius, by stepped motion
+tests watched through odometry. Before each run it checks the room in that direction with
+whatever range sensors the robot has (scans, point clouds or depth images). The forward runs
+also compare the distance odometry reports with the change in range to what is ahead; an
+odometry scale more than 5% off is reported as a problem to fix in the robot's driver.
+Measured values replace declared ones only where they are worse (slower, weaker braking,
+wider turns, more latency), and are marked `calibrated` in the profile.
+
+Argo will not move into space next to the robot that no sensor has looked at yet, except
+space only above or below its sensors' vertical view. Set `assumptions.clear_at_start_m` in
+the profile to declare how much room around the robot's starting spot is clear (0.5 m is
+typical), and start it there; the setup report says if it is missing.
 
 ```sh
 python3 -m argus setup calibrate profile.yaml -o profile.calibrated.yaml
