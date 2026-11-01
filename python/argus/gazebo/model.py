@@ -14,6 +14,13 @@ systems the way a motor controller drives real wheels (a velocity servo that can
 hard as its torque allows), so wheel slip, inertia and too little torque all show up. Odometry
 comes from the wheels and drifts like real wheel odometry. The true pose goes out on a separate topic, for judging runs only.
 
+Aerial bodies get four rotors on revolute joints, each driven by Gazebo's multicopter motor
+model (thrust and drag from rotor speed, motor time constants), and Gazebo's multicopter
+velocity controller turning a body-frame velocity and yaw-rate command into rotor speeds, as
+in Gazebo's own X3 example (worlds/multicopter_velocity_control.sdf), whose motor constants and
+controller gains are used here; the gains are normalised by the vehicle's inertia, so they carry
+over to bodies of similar size. Thrust is sized for twice the body's weight.
+
 Sensors are Gazebo's lidar and depth camera at the profile's frames, rates, ranges and fields
 of view, with Gaussian noise. A robot with a real URDF should be simulated from that instead.
 """
@@ -119,7 +126,11 @@ def _sensor(s: dict, frame: dict, topic: str) -> str:
                 "<z><noise type=\"gaussian\"><stddev>0.02</stddev></noise></z></linear_acceleration></imu>"
                 "</sensor>")
     if kind == "depth":
-        width = 160
+        # Gazebo cameras take no less than 0.1 rad across; a narrower sensor (a single-beam
+        # rangefinder modelled as depth) is simulated that wide, with a small image.
+        h = max(h, 0.1)
+        v = max(v, 0.1)
+        width = 160 if h > 0.5 else 16
         height = max(2, int(round(width * math.tan(v / 2) / math.tan(h / 2))))
         return (head.format(t="depth_camera")
                 + f"<camera><horizontal_fov>{h:.6g}</horizontal_fov><image><width>{width}</width>"
@@ -178,7 +189,7 @@ def model_sdf(doc: dict, name: str = "robot", pose=(0.0, 0.0, 0.0, 0.0), odom_sc
     a wrong wheel radius in a robot's driver does: odometry then overstates distance by it."""
     motion = doc["motion"]
     if motion["space"] != "planar":
-        raise ValueError("Gazebo models for aerial bodies are not supported yet")
+        return _aerial_sdf(doc, name, pose)
     turn_radius = motion.get("min_turn_radius_m", 0.0)
     if motion.get("can_strafe"):
         drive = "mecanum"
@@ -279,9 +290,14 @@ def model_sdf(doc: dict, name: str = "robot", pose=(0.0, 0.0, 0.0, 0.0), odom_sc
                                                                    "accel_mps2": accel, "decel_mps2": decel})
             + common + "</plugin>")
     else:
-        # Rear axle driven, front wheels steered. The tightest turn the profile allows sets the
-        # steering limit, measured at the rear axle.
-        steer_limit = math.atan(wheelbase / turn_radius)
+        # Rear axle driven, front wheels steered. Gazebo's AckermannSteering takes its tightest
+        # turn as wheelbase / sin(steering_limit), so the limit is chosen to make that the
+        # profile's radius. It then steers each wheel to atan(wheelbase / (radius -+ kingpin / 2))
+        # without clamping, so the joints must let the inner wheel reach its angle at that
+        # radius; a joint stop short of it jams the car at full lock.
+        steer_limit = math.asin(min(wheelbase / turn_radius, 0.95))
+        tightest = wheelbase / math.sin(steer_limit)
+        joint_limit = math.atan2(wheelbase, tightest - separation / 2) + 0.05
         rear_x = centre[0] - wheelbase / 2
         front_x = centre[0] + wheelbase / 2
         for side, y in (("left", separation / 2), ("right", -separation / 2)):
@@ -291,7 +307,7 @@ def model_sdf(doc: dict, name: str = "robot", pose=(0.0, 0.0, 0.0, 0.0), odom_sc
             parts.append(f'<link name="front_{side}_steering">{_pose((front_x, y, axle_z))}'
                          f"{_inertia(hub_mass, 1e-3, 1e-3, 1e-3)}</link>")
             parts.append(_joint(f"front_{side}_steering_joint", "base_link", f"front_{side}_steering",
-                                effort=5.0, velocity=2.0, lower=-steer_limit, upper=steer_limit, damping=0.5))
+                                effort=5.0, velocity=2.0, lower=-joint_limit, upper=joint_limit, damping=0.5))
             parts.append(_wheel(f"front_{side}_wheel", (front_x, y, axle_z), radius, _surface(1.0)))
             parts.append(_joint(f"front_{side}_wheel_joint", f"front_{side}_steering", f"front_{side}_wheel",
                                 effort=0.0, velocity=wheel_speed))
@@ -318,4 +334,103 @@ def model_sdf(doc: dict, name: str = "robot", pose=(0.0, 0.0, 0.0, 0.0), odom_sc
     x, y, z, heading = pose
     sdf = (f'<model name="{escape(name)}">{_pose((x, y, z), (0.0, 0.0, heading))}'
            + "".join(base) + "".join(parts) + drive_plugin + truth + "</model>")
+    return sdf, t
+
+
+# Gazebo's X3 example: motor time constants, top rotor speed and moment constant, and the
+# velocity controller's gains (normalised by inertia inside the controller).
+ROTOR_MAX_RADPS = 800.0
+ROTOR_MOMENT_CONSTANT = 0.016
+ROTOR_DRAG = 8.06428e-05
+G = 9.81
+
+
+def _aerial_sdf(doc: dict, name: str, pose) -> tuple[str, Topics]:
+    motion = doc["motion"]
+    shapes = doc["geometry"]["shapes"]
+    lo = [math.inf] * 3
+    hi = [-math.inf] * 3
+    volume = 0.0
+    for s in shapes:
+        a, b, vol = _extent(s)
+        lo = [min(lo[i], a[i]) for i in range(3)]
+        hi = [max(hi[i], b[i]) for i in range(3)]
+        volume += vol
+    mass = max(1.0, DENSITY * volume)
+    size = [max(0.05, hi[i] - lo[i]) for i in range(3)]
+    centre = [(hi[i] + lo[i]) / 2 for i in range(3)]
+    # Rotors on the diagonals, at the top of the body; diagonal pairs turn the same way.
+    arm = 0.35 * min(size[0], size[1])
+    rotor_z = hi[2]
+    force_constant = 2.0 * mass * G / (4 * ROTOR_MAX_RADPS ** 2)
+    rotors = [((arm, -arm), "ccw", 1), ((-arm, arm), "ccw", 1), ((arm, arm), "cw", -1), ((-arm, -arm), "cw", -1)]
+
+    t = Topics(model=name, cmd_vel=f"/{name}/gazebo/command/twist", odom=f"/model/{name}/odometry",
+               truth=f"/model/{name}/truth")
+    base = ['<link name="base_link">',
+            f"<inertial>{_pose(centre)}<mass>{mass:.6g}</mass>{_box_inertia(mass, *size)}</inertial>"]
+    for i, s in enumerate(shapes):
+        p = s.get("pose", {})
+        geo = _shape_geometry(s)
+        sp = _pose(p.get("xyz_m", [0, 0, 0]), p.get("rpy_rad", [0, 0, 0]))
+        base.append(f'<collision name="body_{i}">{sp}<geometry>{geo}</geometry>{_surface(0.5)}</collision>')
+        base.append(f'<visual name="body_{i}_visual">{sp}<geometry>{geo}</geometry></visual>')
+    frames = doc["geometry"].get("frames", {})
+    for s in doc.get("sensors", []):
+        if s["kind"] in ("range_2d", "range_3d", "depth", "imu"):
+            topic = f"/model/{name}/{s['id']}" + ("/image" if s["kind"] == "depth" else "")
+            t.sensors[s["id"]] = topic
+            t.kinds[s["id"]] = s["kind"]
+            base.append(_sensor(s, frames.get(s["frame"], {}), topic))
+    base.append("</link>")
+
+    parts = []
+    plugins = []
+    config = []
+    for k, ((x, y), turning, direction) in enumerate(rotors):
+        link = f"rotor_{k}"
+        joint = f"rotor_{k}_joint"
+        parts.append(f'<link name="{link}">{_pose((x, y, rotor_z + 0.02))}{_inertia(0.025, 1e-5, 1e-4, 1e-4)}'
+                     f'<visual name="{link}_visual"><geometry><cylinder><radius>{0.6 * arm:.4g}</radius>'
+                     "<length>0.005</length></cylinder></geometry></visual></link>")
+        parts.append(f'<joint name="{joint}" type="revolute"><parent>base_link</parent><child>{link}</child>'
+                     "<axis><xyz>0 0 1</xyz><limit><lower>-1e16</lower><upper>1e16</upper></limit></axis></joint>")
+        plugins.append(
+            '<plugin filename="gz-sim-multicopter-motor-model-system" name="gz::sim::systems::MulticopterMotorModel">'
+            f"<robotNamespace>{name}</robotNamespace><jointName>{joint}</jointName><linkName>{link}</linkName>"
+            f"<turningDirection>{turning}</turningDirection><timeConstantUp>0.0125</timeConstantUp>"
+            f"<timeConstantDown>0.025</timeConstantDown><maxRotVelocity>{ROTOR_MAX_RADPS}</maxRotVelocity>"
+            f"<motorConstant>{force_constant:.6g}</motorConstant><momentConstant>{ROTOR_MOMENT_CONSTANT}</momentConstant>"
+            f"<commandSubTopic>gazebo/command/motor_speed</commandSubTopic><actuator_number>{k}</actuator_number>"
+            f"<rotorDragCoefficient>{ROTOR_DRAG}</rotorDragCoefficient><rollingMomentCoefficient>1e-06</rollingMomentCoefficient>"
+            f"<motorSpeedPubTopic>motor_speed/{k}</motorSpeedPubTopic><rotorVelocitySlowdownSim>10</rotorVelocitySlowdownSim>"
+            "<motorType>velocity</motorType></plugin>")
+        config.append(f"<rotor><jointName>{joint}</jointName><forceConstant>{force_constant:.6g}</forceConstant>"
+                      f"<momentConstant>{ROTOR_MOMENT_CONSTANT}</momentConstant><direction>{direction}</direction></rotor>")
+    acc = [motion["limits"][a].get("accel_mps2", 2.0) for a in ("x", "y", "z")]
+    yaw = motion["limits"]["yaw"]
+    plugins.append(
+        '<plugin filename="gz-sim-multicopter-control-system" name="gz::sim::systems::MulticopterVelocityControl">'
+        f"<robotNamespace>{name}</robotNamespace><commandSubTopic>gazebo/command/twist</commandSubTopic>"
+        "<enableSubTopic>enable</enableSubTopic><comLinkName>base_link</comLinkName>"
+        "<velocityGain>2.7 2.7 2.7</velocityGain><attitudeGain>2 3 0.15</attitudeGain>"
+        "<angularRateGain>0.4 0.52 0.18</angularRateGain>"
+        f"<maximumLinearAcceleration>{acc[0]:.4g} {acc[1]:.4g} {acc[2]:.4g}</maximumLinearAcceleration>"
+        f"<maximumAngularVelocity>3 3 {yaw['rate_radps']:.4g}</maximumAngularVelocity>"
+        f"<rotorConfiguration>{''.join(config)}</rotorConfiguration></plugin>")
+    # The flight estimate: Gazebo's odometry with noise, as an autopilot's estimate would have.
+    plugins.append(
+        '<plugin filename="gz-sim-odometry-publisher-system" name="gz::sim::systems::OdometryPublisher">'
+        f"<odom_topic>{t.odom}</odom_topic><odom_frame>odom</odom_frame><robot_base_frame>base_link</robot_base_frame>"
+        "<odom_publish_frequency>50</odom_publish_frequency><dimensions>3</dimensions>"
+        "<gaussian_noise>0.01</gaussian_noise></plugin>")
+    plugins.append(
+        '<plugin filename="gz-sim-odometry-publisher-system" name="gz::sim::systems::OdometryPublisher">'
+        f"<odom_topic>{t.truth}</odom_topic><odom_frame>world</odom_frame><robot_base_frame>base_link</robot_base_frame>"
+        "<odom_publish_frequency>50</odom_publish_frequency><dimensions>3</dimensions></plugin>")
+    t.drive = {"kind": "multirotor", "mass_kg": round(mass, 3), "rotor_arm_m": round(arm, 4),
+               "force_constant": force_constant, "thrust_to_weight": 2.0}
+    x, y, z, heading = pose
+    sdf = (f'<model name="{escape(name)}">{_pose((x, y, z), (0.0, 0.0, heading))}'
+           + "".join(base) + "".join(parts) + "".join(plugins) + "</model>")
     return sdf, t

@@ -46,12 +46,20 @@ def _car_like():
     return doc
 
 
-# Reaches about 3 runs in 4: it sometimes stops before the gap with standing still scoring best.
-CAR_LIKE_MISSES = pytest.mark.xfail(reason="car-like tracking under turn mismatch, see needed_fixes", strict=False)
+def _quadcopter():
+    # The X500 class commands pose setpoints over MAVLink; Gazebo's multicopter takes a body
+    # velocity, so in simulation it is commanded and estimated over ROS 2 like the ground robots.
+    doc = profiles.load(Path(__file__).parent / "bodies" / "x500_class.yaml")
+    doc["control"].update({"interface": "velocity", "transport": "ros2", "endpoint": "/cmd_vel"})
+    for s in doc["sensors"]:
+        if s["kind"] == "odometry":
+            s["source"] = {"transport": "ros2", "endpoint": "/odom"}
+        if s["kind"] == "imu":
+            s["source"] = {"transport": "ros2", "endpoint": "/imu"}
+    return doc
 
 
-@pytest.mark.parametrize("make", [lambda: _example("planar_differential"), _omnidirectional,
-                                  pytest.param(_car_like, marks=CAR_LIKE_MISSES)],
+@pytest.mark.parametrize("make", [lambda: _example("planar_differential"), _omnidirectional, _car_like],
                          ids=["differential", "omnidirectional", "car_like"])
 def test_body_reaches_the_goal_behind_the_wall_without_touching_it(make, tmp_path):
     ep = run_gazebo_episode(make(), worlds.wall_with_gap(), (0.0, 0.0, 0.0, 0.0), GOAL, 90.0,
@@ -151,11 +159,12 @@ def test_calibration_catches_optimistic_braking_and_a_wider_turn(tmp_path):
     assert "motion.limits.yaw.rate_radps" in got
     assert profiles.problems(cal.profile) == []
 
-    car = _car_like()
+    true_car = _car_like()
+    true_car["motion"]["min_turn_radius_m"] = 1.0
     (tmp_path / "car").mkdir()
-    cal = _calibrate_in_gazebo(car, car, tmp_path / "car")
+    cal = _calibrate_in_gazebo(true_car, _car_like(), tmp_path / "car")
     assert cal.problems == [], cal.text()
-    assert cal.profile["motion"]["min_turn_radius_m"] > 0.85, cal.text()
+    assert cal.profile["motion"]["min_turn_radius_m"] > 0.9, cal.text()
 
 
 def test_argo_refuses_a_setup_motion_into_a_wall(tmp_path):
@@ -199,3 +208,11 @@ def test_calibration_measures_every_axis_and_catches_wrong_odometry(tmp_path):
     diff = _example("planar_differential")
     cal = _calibrate_in_gazebo(diff, diff, tmp_path / "diff", odom_scale=1.1)
     assert any("odometry reports" in p and "more" in p for p in cal.problems), cal.text()
+
+
+def test_quadcopter_flies_through_the_pillars_without_touching_one(tmp_path):
+    world = worlds.pillars(1, keep_clear=[(-4.0, 0.0), (4.0, 1.0)])
+    ep = run_gazebo_episode(_quadcopter(), world, (-4.0, 0.0, 1.5, 0.0), (4.0, 1.0, 1.5), 90.0,
+                            workdir=str(tmp_path))
+    assert not ep.collided, ep.final_pose
+    assert ep.goal_reached, (ep.mission_state, ep.final_pose, ep.time_s)
