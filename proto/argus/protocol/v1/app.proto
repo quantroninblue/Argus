@@ -75,6 +75,67 @@ message HubEvent {
   string detail = 4;
 }
 
+// A robot design: the user's URDF with its meshes, optional Gazebo model and answers file,
+// gathered on the user's side (argus.hub.designs.collect) and sent whole, so the hub never
+// reads the user's files directly.
+message DesignFile {
+  string path = 1;  // inside the design, e.g. robot.urdf or packages/my_robot/meshes/base.stl
+  bytes data = 2;
+}
+
+message Finding {
+  string severity = 1;  // error (cannot run), warning, note
+  string where = 2;
+  string text = 3;
+}
+
+message AddDesignRequest {
+  string name = 1;
+  repeated DesignFile files = 2;
+  repeated Finding collect_findings = 3;  // problems found while gathering the files
+}
+
+message DesignVersion {
+  string name = 1;
+  string version = 2;  // hash of the design's files
+  double created = 3;  // Unix time
+  bool has_answers = 4;
+  bool has_gazebo_model = 5;
+  string profile_id = 6;  // empty when no profile could be built
+  repeated Finding findings = 7;
+  bool runnable = 8;      // no errors: the design may run in Gazebo
+}
+
+message AddDesignReply {
+  bool ok = 1;
+  string detail = 2;
+  DesignVersion design = 3;
+  bool added = 4;  // false when this exact version was already stored
+}
+
+message DesignsRequest {}
+
+message DesignHistory {
+  string name = 1;
+  repeated DesignVersion versions = 2;  // oldest first
+}
+
+message DesignsReply {
+  repeated DesignHistory designs = 1;
+}
+
+message DesignRequest {
+  string name = 1;
+  string version = 2;  // a prefix is enough; empty means the latest
+}
+
+message DesignReply {
+  bool found = 1;
+  string detail = 2;
+  DesignVersion design = 3;
+  string capability_report = 4;  // empty when no profile could be built
+}
+
 service HubApp {
   rpc Status(StatusRequest) returns (HubStatus);
   rpc Robots(RobotsRequest) returns (RobotsReply);
@@ -82,4 +143,7 @@ service HubApp {
   rpc Cancel(CancelRequest) returns (Reply);
   // Events as they happen, until the caller hangs up.
   rpc Watch(WatchRequest) returns (stream HubEvent);
+  rpc AddDesign(AddDesignRequest) returns (AddDesignReply);
+  rpc Designs(DesignsRequest) returns (DesignsReply);
+  rpc Design(DesignRequest) returns (DesignReply);
 }

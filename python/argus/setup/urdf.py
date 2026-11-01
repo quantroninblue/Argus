@@ -116,6 +116,9 @@ def resolve_mesh(uri: str, urdf_dir: Path, packages: dict[str, Path]) -> Path:
                 roots.append(Path(prefix) / "share" / pkg)
         p = next((r / rest for r in roots if (r / rest).is_file()), None)
         if p is None:
+            found = [r for r in roots if r.is_dir()]
+            if found:
+                raise UrdfError(f"mesh {uri}: package {pkg!r} has no file {rest} (looked in {found[0]})")
             raise UrdfError(f"mesh {uri}: package {pkg!r} not found; pass --package {pkg}=<directory>")
     else:
         p = Path(uri)

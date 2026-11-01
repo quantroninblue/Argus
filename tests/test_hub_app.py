@@ -254,3 +254,35 @@ def test_every_call_goes_through_one_authorisation_point():
 def test_version_matches_the_package():
     meta = tomllib.loads((ROOT / "pyproject.toml").read_text())
     assert VERSION == meta["project"]["version"]
+
+
+def test_designs_are_added_listed_and_shown_through_the_command(running_hub, tmp_path, capsys):
+    from test_designs import _design_dir
+
+    d, packages = _design_dir(tmp_path)
+    home = ["--home", str(running_hub.root)]
+    pkg = [f"--package=my_robot={packages['my_robot']}"]
+    assert main(["design", "add", str(d / "robot.urdf"), "-a", str(d / "answers.yaml")] + pkg + home) == 0
+    out = capsys.readouterr().out
+    assert out.startswith("test-rover ") and "runnable" in out and "note: link sensor" in out
+    assert main(["design", "add", str(d / "robot.urdf"), "-a", str(d / "answers.yaml")] + pkg + home) == 0
+    assert "(already stored)" in capsys.readouterr().out
+
+    broken, broken_pkgs = _design_dir(tmp_path / "broken", wheel_inertial=False)
+    assert main(["design", "add", str(broken / "robot.urdf"), "-a", str(broken / "answers.yaml"), "--name", "flimsy",
+                 f"--package=my_robot={broken_pkgs['my_robot']}"] + home) == 1
+    assert "error: link wheel" in capsys.readouterr().out
+
+    assert main(["design", "list"] + home) == 0
+    listing = capsys.readouterr().out.splitlines()
+    assert [line.split()[0] for line in listing] == ["flimsy", "test-rover"]
+    assert "cannot run" in listing[0] and "1 error" in listing[0]
+
+    assert main(["design", "show", "test-rover"] + home) == 0
+    shown = capsys.readouterr().out
+    assert "profile my-robot" in shown and "Ready to drive: yes" in shown
+    version = shown.split()[1]
+    assert main(["design", "show", f"test-rover@{version[:5]}"] + home) == 0
+    capsys.readouterr()
+    assert main(["design", "show", "nothing"] + home) == 1
+    assert "no design 'nothing'" in capsys.readouterr().err

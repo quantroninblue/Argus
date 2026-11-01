@@ -9,9 +9,12 @@ import grpc
 
 from argus.protocol.v1 import app_pb2, app_pb2_grpc
 
+from .designs import Bundle
 from .home import Home
 
 TIMEOUT_S = 5.0
+DESIGN_TIMEOUT_S = 120.0  # storing a design runs Gazebo's check of it
+MAX_MESSAGE_BYTES = 300 * 1024 * 1024
 
 
 class HubUnavailable(RuntimeError):
@@ -25,7 +28,9 @@ class AppClient:
             raise HubUnavailable(f"no hub is running at {home.root} (start one with: python3 -m argus hub start"
                                  + ("" if home.root == Home.at().root else f" --home {home.root}") + ")")
         self._channel = grpc.secure_channel(f"unix:{home.socket}",
-                                            grpc.local_channel_credentials(grpc.LocalConnectionType.UDS))
+                                            grpc.local_channel_credentials(grpc.LocalConnectionType.UDS),
+                                            options=[("grpc.max_send_message_length", MAX_MESSAGE_BYTES),
+                                                     ("grpc.max_receive_message_length", MAX_MESSAGE_BYTES)])
         self._stub = app_pb2_grpc.HubAppStub(self._channel)
 
     def close(self) -> None:
@@ -37,9 +42,9 @@ class AppClient:
     def __exit__(self, *exc) -> None:
         self.close()
 
-    def _call(self, method, request):
+    def _call(self, method, request, timeout: float = TIMEOUT_S):
         try:
-            return method(request, timeout=TIMEOUT_S)
+            return method(request, timeout=timeout)
         except grpc.RpcError as e:
             if e.code() == grpc.StatusCode.UNAVAILABLE:
                 raise HubUnavailable(f"the hub at {self.home.root} is not answering") from e
@@ -57,6 +62,18 @@ class AppClient:
 
     def cancel(self, node_id: str) -> app_pb2.Reply:
         return self._call(self._stub.Cancel, app_pb2.CancelRequest(node_id=node_id))
+
+    def add_design(self, bundle: Bundle) -> app_pb2.AddDesignReply:
+        request = app_pb2.AddDesignRequest(
+            name=bundle.name, files=[app_pb2.DesignFile(path=k, data=v) for k, v in sorted(bundle.files.items())],
+            collect_findings=[app_pb2.Finding(severity=f.severity, where=f.where, text=f.text) for f in bundle.findings])
+        return self._call(self._stub.AddDesign, request, DESIGN_TIMEOUT_S)
+
+    def designs(self) -> app_pb2.DesignsReply:
+        return self._call(self._stub.Designs, app_pb2.DesignsRequest())
+
+    def design(self, name: str, version: str = "") -> app_pb2.DesignReply:
+        return self._call(self._stub.Design, app_pb2.DesignRequest(name=name, version=version))
 
     def watch(self) -> Iterator[app_pb2.HubEvent]:
         try:
@@ -98,3 +115,21 @@ def format_robots(reply: app_pb2.RobotsReply) -> str:
 def format_event(e: app_pb2.HubEvent) -> str:
     stamp = time.strftime("%H:%M:%S", time.localtime(e.stamp))
     return " ".join(x for x in (stamp, e.kind, e.node_id, e.detail) if x)
+
+
+def format_findings(findings) -> str:
+    order = {"error": 0, "warning": 1, "note": 2}
+    lines = []
+    for f in sorted(findings, key=lambda f: order.get(f.severity, 3)):
+        lines.append(f"  {f.severity}: {f.where + ': ' if f.where else ''}{f.text}")
+    return "\n".join(lines)
+
+
+def format_design(v: app_pb2.DesignVersion) -> str:
+    when = time.strftime("%Y-%m-%d %H:%M", time.localtime(v.created))
+    parts = [f"{v.name} {v.version} ({when})", "runnable" if v.runnable else "cannot run",
+             f"profile {v.profile_id}" if v.profile_id else "no profile",
+             "own Gazebo model" if v.has_gazebo_model else "no Gazebo model (Argus adds a drive and sensors)"]
+    counts = {s: sum(1 for f in v.findings if f.severity == s) for s in ("error", "warning", "note")}
+    tally = ", ".join(f"{n} {s}{'s' if n != 1 else ''}" for s, n in counts.items() if n)
+    return ", ".join(parts) + (f"; {tally}" if tally else "")

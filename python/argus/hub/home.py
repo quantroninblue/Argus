@@ -3,6 +3,7 @@
     profiles/        body profiles (*.yaml)
     robots.yaml      node_id: {profile, site} for every robot allowed to connect
     pki/             ca.pem, ca.key, hub.pem, hub.key (robots' certificates are issued here)
+    designs/         robot designs, one directory per version (see designs.py)
     runs/            run logs
     run/app.sock     the app interface; run/ is readable only by the hub's owner
 
@@ -48,6 +49,10 @@ class Home:
         return self.root / "pki"
 
     @property
+    def designs(self) -> Path:
+        return self.root / "designs"
+
+    @property
     def runs(self) -> Path:
         return self.root / "runs"
 
@@ -62,7 +67,7 @@ class Home:
     def init(self, hosts: list[str]) -> list[str]:
         """Creates whatever is missing; returns what was made. Existing keys are never replaced."""
         made = []
-        for d in (self.root, self.profiles, self.pki, self.runs):
+        for d in (self.root, self.profiles, self.pki, self.designs, self.runs):
             if not d.is_dir():
                 d.mkdir(parents=True)
                 made.append(f"{d}/")

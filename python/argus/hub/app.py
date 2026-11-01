@@ -23,6 +23,7 @@ import grpc
 
 from argus.protocol.v1 import app_pb2, app_pb2_grpc, node_messages_pb2
 
+from .designs import Bundle, DesignStore, DesignVersion, Finding
 from .gateway import Hub
 from .home import Home
 
@@ -30,6 +31,8 @@ VERSION = "0.1.0"  # kept equal to pyproject.toml by a test
 DEFAULT_TOLERANCE_M = 0.4
 EVENT_QUEUE = 256  # events kept for a slow watcher; the oldest go first
 EVENT_POLL_S = 0.1
+# Designs travel whole in one message (their meshes included), up to designs.MAX_BUNDLE_BYTES.
+MAX_MESSAGE_BYTES = 300 * 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -42,7 +45,9 @@ class Caller:
 
 
 # What each call does, for authorisation: "read" looks, "control" changes what robots do.
-ACTIONS = {"status": "read", "robots": "read", "watch": "read", "goal": "control", "cancel": "control"}
+# "change" alters what the hub stores.
+ACTIONS = {"status": "read", "robots": "read", "watch": "read", "designs": "read", "design": "read",
+           "goal": "control", "cancel": "control", "add_design": "change"}
 
 
 def local_caller() -> Caller:
@@ -96,6 +101,13 @@ def robots_reply(hub: Hub, now: float) -> app_pb2.RobotsReply:
     return reply
 
 
+def design_message(v: DesignVersion) -> app_pb2.DesignVersion:
+    return app_pb2.DesignVersion(name=v.name, version=v.version, created=v.created, has_answers=v.has_answers,
+                                 has_gazebo_model=v.has_gazebo_model, profile_id=v.profile_id,
+                                 findings=[app_pb2.Finding(severity=f.severity, where=f.where, text=f.text)
+                                           for f in v.findings], runnable=v.runnable)
+
+
 class Events:
     """Hub events for watchers. Robot state is compared with the last look every
     EVENT_POLL_S; each change becomes an event."""
@@ -146,6 +158,7 @@ class AppService(app_pb2_grpc.HubAppServicer):
         self.robot_address = robot_address
         self.clock = clock
         self.started_at = clock()
+        self.designs = DesignStore(home.designs)
 
     async def _caller(self, context, action: str) -> Caller:
         caller = identify(context)
@@ -189,6 +202,41 @@ class AppService(app_pb2_grpc.HubAppServicer):
         self.hub.cancel(request.node_id)
         return app_pb2.Reply(ok=True, detail=f"{request.node_id}: cancelled")
 
+    async def AddDesign(self, request, context):
+        await self._caller(context, "add_design")
+        bundle = Bundle(name=request.name, files={f.path: f.data for f in request.files},
+                        findings=[Finding(f.severity, f.where, f.text) for f in request.collect_findings])
+        try:
+            # Checking a design includes Gazebo's own check and takes seconds, so it runs off
+            # the loop that serves robots.
+            v, added = await asyncio.to_thread(self.designs.add, bundle)
+        except (ValueError, OSError) as e:
+            return app_pb2.AddDesignReply(ok=False, detail=str(e))
+        state = "runnable" if v.runnable else "cannot run until its errors are fixed"
+        return app_pb2.AddDesignReply(ok=True, added=added, design=design_message(v),
+                                      detail=f"{v.name} {v.version}{'' if added else ' (already stored)'}: {state}")
+
+    async def Designs(self, request, context):
+        await self._caller(context, "designs")
+        reply = app_pb2.DesignsReply()
+        for name in self.designs.names():
+            reply.designs.add(name=name, versions=[design_message(v) for v in self.designs.versions(name)])
+        return reply
+
+    async def Design(self, request, context):
+        await self._caller(context, "design")
+        v = self.designs.get(request.name, request.version or None)
+        if v is None:
+            what = f"{request.name}@{request.version}" if request.version else request.name
+            return app_pb2.DesignReply(found=False, detail=f"no design {what!r}")
+        report = ""
+        doc = self.designs.profile(v)
+        if doc is not None:
+            from argus.setup.report import capability_report
+
+            report = capability_report(doc)
+        return app_pb2.DesignReply(found=True, design=design_message(v), capability_report=report)
+
     async def Watch(self, request, context):
         await self._caller(context, "watch")
         q = self.events.subscribe()
@@ -231,7 +279,8 @@ class AppServer:
             if _socket_in_use(sock):
                 raise HubAlreadyRunning(f"a hub is already running at {self.home.root}")
             sock.unlink()  # left behind by a hub that did not stop cleanly
-        self._server = grpc.aio.server()
+        self._server = grpc.aio.server(options=[("grpc.max_receive_message_length", MAX_MESSAGE_BYTES),
+                                                ("grpc.max_send_message_length", MAX_MESSAGE_BYTES)])
         app_pb2_grpc.add_HubAppServicer_to_server(self.service, self._server)
         self._server.add_secure_port(f"unix:{sock}", grpc.local_server_credentials(grpc.LocalConnectionType.UDS))
         await self._server.start()

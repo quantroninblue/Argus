@@ -18,6 +18,10 @@
                                    send a robot to a point in its site frame
   cancel ROBOT                     stop a robot's mission
   watch                            hub events as they happen, until Ctrl-C
+  design add URDF [-a ANSWERS] [--gazebo-model FILE] [--package NAME=DIR] [--name NAME]
+                                   store a robot design on the hub and check it
+  design list                      every design and its versions
+  design show NAME[@VERSION]       a design's findings and capability report
 
 Every hub command takes --home DIR (default ~/.local/share/argus, or ARGUS_HOME).
 """
@@ -117,13 +121,9 @@ def _setup(args) -> int:
             return 1
         print(capability_report(doc))
         return 0
-    packages = {}
-    for item in args.package or []:
-        name, sep, directory = item.partition("=")
-        if not sep:
-            print(f"--package {item}: expected NAME=DIRECTORY", file=sys.stderr)
-            return 2
-        packages[name] = Path(directory)
+    packages = _packages(args.package)
+    if packages is None:
+        return 2
     try:
         doc, problems, notes = build_profile(args.urdf, load_answers(args.answers), args.base_frame, packages)
     except (UrdfError, ValueError, OSError) as e:
@@ -144,12 +144,70 @@ def _setup(args) -> int:
     return 0
 
 
+def _packages(items) -> dict[str, Path] | None:
+    packages = {}
+    for item in items or []:
+        name, sep, directory = item.partition("=")
+        if not sep:
+            print(f"--package {item}: expected NAME=DIRECTORY", file=sys.stderr)
+            return None
+        packages[name] = Path(directory)
+    return packages
+
+
+def _design(hub, args) -> int:
+    from argus.hub.client import format_design, format_findings
+
+    if args.action == "add":
+        from argus.hub.designs import collect
+        from argus.setup.urdf import UrdfError
+
+        packages = _packages(args.package)
+        if packages is None:
+            return 2
+        try:
+            bundle = collect(args.urdf, args.answers, args.gazebo_model, packages, args.name)
+        except (UrdfError, OSError) as e:
+            print(e, file=sys.stderr)
+            return 1
+        reply = hub.add_design(bundle)
+        if not reply.ok:
+            print(reply.detail, file=sys.stderr)
+            return 1
+        print(reply.detail)
+        if reply.design.findings:
+            print(format_findings(reply.design.findings))
+        return 0 if reply.design.runnable else 1
+    if args.action == "list":
+        reply = hub.designs()
+        if not reply.designs:
+            print("no designs yet; add one with: python3 -m argus design add URDF -a ANSWERS")
+        for d in reply.designs:
+            for v in d.versions:
+                print(format_design(v))
+        return 0
+    name, _, version = args.design.partition("@")
+    reply = hub.design(name, version)
+    if not reply.found:
+        print(reply.detail, file=sys.stderr)
+        return 1
+    print(format_design(reply.design))
+    if reply.design.findings:
+        print(format_findings(reply.design.findings))
+    if reply.capability_report:
+        print()
+        print(reply.capability_report)
+    return 0
+
+
 def _client(args) -> int:
     from argus.hub.client import AppClient, HubUnavailable, format_event, format_robots, format_status
     from argus.hub.home import Home
 
     try:
         with AppClient(Home.at(args.home)) as hub:
+            if args.command == "design":
+                return _design(hub, args)
             if args.command == "status":
                 print(format_status(hub.status()))
             elif args.command == "robots":
@@ -234,6 +292,17 @@ def main(argv: list[str] | None = None) -> int:
     cancel = sub.add_parser("cancel", parents=[home], help="stop a robot's mission")
     cancel.add_argument("robot")
     sub.add_parser("watch", parents=[home], help="hub events as they happen, until Ctrl-C")
+    design = sub.add_parser("design", help="robot designs on the hub")
+    design_actions = design.add_subparsers(dest="action", required=True)
+    add = design_actions.add_parser("add", parents=[home], help="store a robot design on the hub and check it")
+    add.add_argument("urdf", help="the robot's URDF or xacro")
+    add.add_argument("-a", "--answers", help="what the URDF cannot say (see 'setup template')")
+    add.add_argument("--gazebo-model", help="your own Gazebo model of the robot (SDF or xacro), with its plugins")
+    add.add_argument("--package", action="append", help="NAME=DIRECTORY for package:// mesh paths")
+    add.add_argument("--name", help="the design's name (default: the URDF's robot name)")
+    design_actions.add_parser("list", parents=[home], help="every design and its versions")
+    show = design_actions.add_parser("show", parents=[home], help="a design's findings and capability report")
+    show.add_argument("design", help="NAME or NAME@VERSION (a version prefix is enough)")
     args = p.parse_args(argv)
     if args.command == "hub":
         from argus.hub import run
@@ -241,7 +310,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.step == "init":
             return run.init(args.home, args.host)
         return run.start(args.home, args.listen, args.intake)
-    if args.command in ("status", "robots", "goal", "cancel", "watch"):
+    if args.command in ("status", "robots", "goal", "cancel", "watch", "design"):
         return _client(args)
     return _certs(args) if args.command == "certs" else _setup(args)
 

@@ -267,6 +267,34 @@ shares it fairly between robots and lowers it while applying evidence takes too 
 time; evidence over a robot's share is dropped, while heartbeats, telemetry and events are
 always processed, so a busy hub degrades its map rather than its links.
 
+## Adding a robot design
+
+A design is your robot as you have it: its URDF or xacro, the meshes it uses, optionally
+your own Gazebo model of it (an SDF or xacro with its plugins), and an answers file for what
+a URDF cannot say (speed and braking limits, the command topic, the failsafe; start one with
+`python3 -m argus setup template`). With the hub running:
+
+```sh
+python3 -m argus design add robot.urdf.xacro -a answers.yaml --gazebo-model robot.sdf.xacro
+python3 -m argus design list
+python3 -m argus design show my-robot
+```
+
+`design add` expands xacro, copies every mesh the files reference into the design, and sends
+it to the hub, which keeps each version (named by a hash of its files) and checks it before
+anything may run it. The checks report problems rather than fixing them:
+
+- errors stop the design from running: a moving link with no mass or with impossible inertia,
+  a missing collision mesh, a file Gazebo rejects, or answers that do not make a valid profile;
+- warnings do not: a missing visual mesh (the robot will look incomplete), anything Gazebo
+  warns about;
+- notes explain what Gazebo will do, such as merging a massless link into the link it is
+  fixed to.
+
+`design show` lists the findings and the capability report of the profile built from the
+design. `package://` mesh paths resolve through a sourced ROS 2 environment or
+`--package NAME=DIRECTORY`.
+
 ## Certificates
 
 The hub and every robot authenticate each other with certificates from the hub's own
