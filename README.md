@@ -231,43 +231,55 @@ Each run writes a log: the world and model SDF, the profile, the true trajectory
 command Argo sent, the robot's own odometry, a summary of every ROS 2 topic (rate, stamp lag,
 gaps) and Argo's events. Pass `record_bag=True` to also record every topic to an mcap bag.
 
-## Certificates
-
-The hub and every robot authenticate each other with certificates from your own authority.
-A robot's certificate name must match its Argo `node_id`.
-
-```sh
-export PYTHONPATH=python
-python3 -m argus certs ca pki
-python3 -m argus certs hub pki --host hub.example.lan --host 192.168.1.20
-python3 -m argus certs robot pki robot-1
-```
-
-Keep `pki/ca.key` off the robots; each robot needs only `ca.pem` and its own certificate and
-key.
-
 ## Running the hub
 
-The hub reads a directory with the robots' profiles, which profile and site each robot uses,
-and its certificates:
+The hub keeps everything in its home directory, `~/.local/share/argus` unless you pass
+`--home DIR` or set `ARGUS_HOME`:
 
 ```
-hub/
-  profiles/rover.yaml
-  robots.yaml          # robot-1: {profile: my-rover, site: warehouse}
-  pki/ca.pem pki/hub.pem pki/hub.key
+profiles/        body profiles (*.yaml)
+robots.yaml      robot-1: {profile: my-rover, site: warehouse}
+pki/             the hub's certificate authority and certificate
+runs/            run logs
+run/app.sock     where the argus command reaches the hub (only you can open it)
 ```
+
+Set it up once, giving every name or address robots will use to reach the hub, then start it:
 
 ```sh
 export PYTHONPATH=python:build/python
-python3 -m argus hub hub/ --intake 20Mbit
+python3 -m argus hub init --host hub.example.lan --host 192.168.1.20
+python3 -m argus hub start --intake 20Mbit
 ```
 
-The console takes `goal ROBOT X Y [Z] [TOLERANCE]`, `cancel ROBOT`, `status` and `quit`.
+The hub runs until Ctrl-C. From another terminal on the same machine (or over SSH):
+
+```sh
+python3 -m argus status                    # the hub, and how many robots are connected
+python3 -m argus robots                    # each robot's pose, link and mission
+python3 -m argus goal robot-1 3 1.5        # send a robot to a point in its site frame
+python3 -m argus cancel robot-1
+python3 -m argus watch                     # robots connecting, link and mission changes
+```
+
 `--intake` is the bandwidth set aside for map evidence from all robots together. The hub
 shares it fairly between robots and lowers it while applying evidence takes too much of its
 time; evidence over a robot's share is dropped, while heartbeats, telemetry and events are
 always processed, so a busy hub degrades its map rather than its links.
+
+## Certificates
+
+The hub and every robot authenticate each other with certificates from the hub's own
+authority. A robot's certificate name must match its Argo `node_id`. `hub init` makes the
+authority and the hub's certificate; issue each robot's from the same directory:
+
+```sh
+python3 -m argus certs robot ~/.local/share/argus/pki robot-1
+```
+
+Keep `ca.key` off the robots; each robot needs only `ca.pem` and its own certificate and key.
+`certs ca` and `certs hub` make an authority and a hub certificate in any directory, if you
+manage certificates yourself.
 
 On each robot, `tools/build_argo.sh` builds the `argo` binary (it lists any missing apt
 packages), and `tools/argo.service` runs it under systemd.

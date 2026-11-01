@@ -1,0 +1,85 @@
+// The hub's app interface: what the argus command (and later the GUI) uses to work with the
+// hub. Served on a Unix socket in the hub's home directory that only the hub's owner can
+// reach; robots use HubLink instead. Every call is made by a caller the hub identifies and
+// authorises in one place, so accounts and remote clients can be added without changing
+// these messages.
+
+syntax = "proto3";
+
+package argus.protocol.v1;
+
+message StatusRequest {}
+
+message HubStatus {
+  string version = 1;
+  string home = 2;            // the hub's home directory
+  string robot_address = 3;   // where robots connect (HubLink), host:port
+  double started_at = 4;      // Unix time
+  uint32 robots_registered = 5;
+  uint32 robots_connected = 6;
+  string caller = 7;          // who the hub took this call to be from
+}
+
+message RobotsRequest {}
+
+message RobotStatus {
+  string node_id = 1;
+  string profile_id = 2;
+  string site_id = 3;
+  bool connected = 4;
+  double seconds_since_heard = 5;  // negative when never heard
+  // Pose in the site frame, when the robot has reported one.
+  bool has_pose = 6;
+  double x = 7;
+  double y = 8;
+  double z = 9;
+  string link = 10;     // connected, degraded, lost, unknown
+  string mission = 11;  // idle, active, reached, failed, cancelled
+  bool failsafe = 12;
+  double evidence_demand_bytes_per_s = 13;
+  double evidence_rate_bytes_per_s = 14;
+  uint64 evidence_dropped = 15;
+}
+
+message RobotsReply {
+  repeated RobotStatus robots = 1;
+  double intake_capacity_bytes_per_s = 2;
+  double intake_configured_bytes_per_s = 3;
+}
+
+message GoalRequest {
+  string node_id = 1;
+  double x = 2;
+  double y = 3;
+  double z = 4;
+  double tolerance_m = 5;  // 0 means the hub's default
+}
+
+message CancelRequest {
+  string node_id = 1;
+}
+
+message Reply {
+  bool ok = 1;
+  string detail = 2;
+}
+
+message WatchRequest {}
+
+// Something that changed on the hub. Kinds: robot_connected, robot_disconnected,
+// link_changed, mission_changed, failsafe_changed; more as features arrive.
+message HubEvent {
+  double stamp = 1;  // Unix time
+  string kind = 2;
+  string node_id = 3;
+  string detail = 4;
+}
+
+service HubApp {
+  rpc Status(StatusRequest) returns (HubStatus);
+  rpc Robots(RobotsRequest) returns (RobotsReply);
+  rpc SetGoal(GoalRequest) returns (Reply);
+  rpc Cancel(CancelRequest) returns (Reply);
+  // Events as they happen, until the caller hangs up.
+  rpc Watch(WatchRequest) returns (stream HubEvent);
+}

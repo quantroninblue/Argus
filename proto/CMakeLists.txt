@@ -10,7 +10,9 @@ protobuf_generate(
   IMPORT_DIRS ${CMAKE_CURRENT_SOURCE_DIR}
   PROTOC_OUT_DIR ${CMAKE_CURRENT_BINARY_DIR})
 
-# Service stubs. Only link.proto declares a service.
+# Service stubs. HubLink (link.proto) has C++ and Python sides; HubApp (app.proto) is served
+# and called from Python only.
+set(ARGUS_APP_PROTO ${CMAKE_CURRENT_SOURCE_DIR}/argus/protocol/v1/app.proto)
 set(ARGUS_SERVICE_PROTO ${CMAKE_CURRENT_SOURCE_DIR}/argus/protocol/v1/link.proto)
 add_library(argus_protocol_grpc ${ARGUS_SERVICE_PROTO})
 target_link_libraries(argus_protocol_grpc PUBLIC argus_protocol gRPC::grpc++)
@@ -29,7 +31,8 @@ if(ARGUS_BUILD_PYTHON)
     string(REGEX REPLACE "\\.proto$" "_pb2.py" py_file ${rel})
     list(APPEND py_outputs ${ARGUS_PYTHON_OUTPUT_DIR}/${py_file})
   endforeach()
-  list(APPEND py_outputs ${ARGUS_PYTHON_OUTPUT_DIR}/argus/protocol/v1/link_pb2_grpc.py)
+  list(APPEND py_outputs ${ARGUS_PYTHON_OUTPUT_DIR}/argus/protocol/v1/link_pb2_grpc.py
+                         ${ARGUS_PYTHON_OUTPUT_DIR}/argus/protocol/v1/app_pb2_grpc.py)
   add_custom_command(
     OUTPUT ${py_outputs}
     COMMAND ${CMAKE_COMMAND} -E make_directory ${ARGUS_PYTHON_OUTPUT_DIR}
@@ -37,7 +40,7 @@ if(ARGUS_BUILD_PYTHON)
             --python_out=${ARGUS_PYTHON_OUTPUT_DIR} ${ARGUS_PROTO_FILES}
     COMMAND protobuf::protoc -I ${CMAKE_CURRENT_SOURCE_DIR}
             --plugin=protoc-gen-grpc_python=$<TARGET_FILE:gRPC::grpc_python_plugin>
-            --grpc_python_out=${ARGUS_PYTHON_OUTPUT_DIR} ${ARGUS_SERVICE_PROTO}
+            --grpc_python_out=${ARGUS_PYTHON_OUTPUT_DIR} ${ARGUS_SERVICE_PROTO} ${ARGUS_APP_PROTO}
     DEPENDS ${ARGUS_PROTO_FILES}
     COMMENT "Generating Python protocol modules")
   add_custom_target(argus_protocol_python ALL DEPENDS ${py_outputs})

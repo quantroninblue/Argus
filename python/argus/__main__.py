@@ -9,8 +9,17 @@
   setup report PROFILE             the capability report of a profile
   setup check PROFILE [--motion]   live checks on the running robot (needs ROS 2)
   setup calibrate PROFILE -o OUT   stepped motion tests; measured limits written back
-  hub DIR [--listen HOST:PORT] [--intake RATE]
-                                   the hub, with an operator console
+  hub init [--host H ...]          a hub home: directories, its CA and certificate
+  hub start [--listen HOST:PORT] [--intake RATE]
+                                   run the hub until Ctrl-C
+  status                           the running hub
+  robots                           every registered robot, its link and mission
+  goal ROBOT X Y [Z] [--tolerance M]
+                                   send a robot to a point in its site frame
+  cancel ROBOT                     stop a robot's mission
+  watch                            hub events as they happen, until Ctrl-C
+
+Every hub command takes --home DIR (default ~/.local/share/argus, or ARGUS_HOME).
 """
 
 from __future__ import annotations
@@ -135,6 +144,35 @@ def _setup(args) -> int:
     return 0
 
 
+def _client(args) -> int:
+    from argus.hub.client import AppClient, HubUnavailable, format_event, format_robots, format_status
+    from argus.hub.home import Home
+
+    try:
+        with AppClient(Home.at(args.home)) as hub:
+            if args.command == "status":
+                print(format_status(hub.status()))
+            elif args.command == "robots":
+                print(format_robots(hub.robots()))
+            elif args.command in ("goal", "cancel"):
+                if args.command == "goal":
+                    reply = hub.goal(args.robot, args.x, args.y, args.z, args.tolerance)
+                else:
+                    reply = hub.cancel(args.robot)
+                print(reply.detail, file=sys.stdout if reply.ok else sys.stderr)
+                return 0 if reply.ok else 1
+            else:
+                try:
+                    for event in hub.watch():
+                        print(format_event(event), flush=True)
+                except KeyboardInterrupt:
+                    pass
+    except HubUnavailable as e:
+        print(e, file=sys.stderr)
+        return 1
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="python3 -m argus")
     sub = p.add_subparsers(dest="command", required=True)
@@ -174,15 +212,37 @@ def main(argv: list[str] | None = None) -> int:
     cal.add_argument("--yes", action="store_true", help="skip the confirmation before moving")
     cal.add_argument("--direct", action="store_true",
                      help="command the robot directly instead of through Argo's supervisor (argo --setup)")
-    hub = sub.add_parser("hub", help="run the hub: registry, TLS and an operator console")
-    hub.add_argument("dir", help="holds profiles/, robots.yaml and pki/")
-    hub.add_argument("--listen", default="0.0.0.0:50051")
-    hub.add_argument("--intake", help="bandwidth for map evidence from all robots, e.g. 20Mbit or 2MB (default 16Mbit)")
+    home = argparse.ArgumentParser(add_help=False)
+    home.add_argument("--home", help="the hub's home directory (default ~/.local/share/argus, or ARGUS_HOME)")
+    hub = sub.add_parser("hub", help="set up and run the hub")
+    hub_steps = hub.add_subparsers(dest="step", required=True)
+    init = hub_steps.add_parser("init", parents=[home], help="a hub home: directories, its CA and certificate")
+    init.add_argument("--host", action="append",
+                      help="name or IP address robots reach the hub at (repeatable; default localhost, 127.0.0.1)")
+    start = hub_steps.add_parser("start", parents=[home], help="run the hub until Ctrl-C")
+    start.add_argument("--listen", default="0.0.0.0:50051", help="where robots connect (default 0.0.0.0:50051)")
+    start.add_argument("--intake", help="bandwidth for map evidence from all robots, e.g. 20Mbit or 2MB "
+                                        "(default 16Mbit)")
+    sub.add_parser("status", parents=[home], help="the running hub")
+    sub.add_parser("robots", parents=[home], help="every registered robot, its link and mission")
+    goal = sub.add_parser("goal", parents=[home], help="send a robot to a point in its site frame")
+    goal.add_argument("robot")
+    goal.add_argument("x", type=float)
+    goal.add_argument("y", type=float)
+    goal.add_argument("z", type=float, nargs="?", default=0.0)
+    goal.add_argument("--tolerance", type=float, default=0.0, help="metres (default 0.4)")
+    cancel = sub.add_parser("cancel", parents=[home], help="stop a robot's mission")
+    cancel.add_argument("robot")
+    sub.add_parser("watch", parents=[home], help="hub events as they happen, until Ctrl-C")
     args = p.parse_args(argv)
     if args.command == "hub":
-        from argus.hub.run import main as hub_main
+        from argus.hub import run
 
-        return hub_main(args.dir, args.listen, args.intake)
+        if args.step == "init":
+            return run.init(args.home, args.host)
+        return run.start(args.home, args.listen, args.intake)
+    if args.command in ("status", "robots", "goal", "cancel", "watch"):
+        return _client(args)
     return _certs(args) if args.command == "certs" else _setup(args)
 
 
