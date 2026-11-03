@@ -18,7 +18,8 @@ build and the runs.
 ```sh
 sudo apt install cmake g++ libeigen3-dev libyaml-cpp-dev libprotobuf-dev protobuf-compiler \
     libgrpc++-dev protobuf-compiler-grpc libgtest-dev pybind11-dev python3-dev python3-yaml \
-    python3-jsonschema python3-protobuf python3-grpcio python3-numpy python3-pytest openssl
+    python3-jsonschema python3-protobuf python3-grpcio python3-numpy python3-pytest python3-jwt \
+    python3-cryptography openssl
 sudo apt install ros-jazzy-ros-gz ros-jazzy-xacro ros-jazzy-nav2-minimal-tb3-sim
 
 git clone https://github.com/quantroninblue/Argus.git argus
@@ -166,7 +167,25 @@ reached its goal or not.
 The hub keeps the newest 10 jobs. `argus jobs keep JOB` keeps one for good; `argus jobs
 delete JOB` frees its space; `argus jobs list` shows them all with their size.
 
-## 8. Your own robot
+## 8. Ask a model why a run failed
+
+This step is optional, and it sends the run's findings, timeline and the end of `argo.log` to
+whichever model you connect ([what leaves your machine](data.md)). A local server keeps all of it
+here.
+
+```sh
+argus models connect openai-compatible http://localhost:11434/v1 --name local
+argus models use reasoning local/llama3.2
+argus models test reasoning
+argus runs explain JOB 2 --ask "why did it stop?"
+```
+
+`JOB` and the run number are the ones from `argus jobs show`. The answer cites the measured facts it
+rests on as `[F1]`, `[F2]` and so on, and the facts are listed below it. Argus warns you when an
+answer cites none, or cites facts that do not exist. With nothing connected, `argus runs explain`
+gives the rule-based findings.
+
+## 9. Your own robot
 
 ```sh
 argus setup template > answers.yaml

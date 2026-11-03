@@ -72,3 +72,31 @@ A job or a design version can be named by the start of its id, as long as only o
 Argo is not part of the argus command: it runs on the robot (`argo --config argo.yaml`), or in
 setup mode for `setup check` and `setup calibrate` (`argo --config argo.yaml --setup`). Build it
 with `tools/build_argo.sh`; `tools/argo.service` runs it under systemd.
+
+## Models
+
+Optional. Without them, `explain` and `review` show the rule-based findings. What each command
+sends where: [data.md](data.md).
+
+```sh
+# a local server, or any OpenAI-compatible endpoint
+argus models connect openai-compatible http://localhost:11434/v1 --name local
+# the Anthropic API; the key is asked for and stays in the hub's memory
+argus models connect anthropic --key-prompt
+argus models connect chatgpt                 # sign in to your ChatGPT plan in your browser
+argus models connect claude-code             # runs your installed Claude Code under your own sign-in
+argus models list
+argus models use reasoning local/llama3.2
+argus models test reasoning
+argus models disconnect local
+
+argus runs explain JOB 3 --ask "why did it stop at the gap?"
+argus jobs explain JOB
+argus jobs compare JOB_BEFORE JOB_AFTER    # run by run, no model needed
+argus design review waffle
+
+argus say rover-1 "take the loading dock" --yes
+```
+
+`argus say` picks one of the site's named places or routes, shows what it understood and asks
+before the robot moves. `--yes` skips the question.

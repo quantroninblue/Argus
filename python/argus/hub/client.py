@@ -17,6 +17,8 @@ from .home import Home
 TIMEOUT_S = 5.0
 DESIGN_TIMEOUT_S = 120.0  # storing a design runs Gazebo's check of it
 CANCEL_TIMEOUT_S = 15.0
+MODEL_TIMEOUT_S = 300.0  # the hub waits on a provider for the answer
+SIGN_IN_TIMEOUT_S = 330
 FOLLOW_POLL_S = 0.5
 MAX_MESSAGE_BYTES = 300 * 1024 * 1024
 
@@ -137,6 +139,44 @@ class AppClient:
 
     def patrol(self, node_id: str, route: str) -> app_pb2.Reply:
         return self._call(self._stub.Patrol, app_pb2.PatrolRequest(node_id=node_id, route=route))
+
+    def connect_model(self, name: str, kind: str, base_url: str = "", key: str = "") -> app_pb2.Reply:
+        return self._call(self._stub.ConnectModel,
+                          app_pb2.ConnectModelRequest(name=name, kind=kind, base_url=base_url, key=key), 60.0)
+
+    def begin_sign_in(self, name: str) -> app_pb2.SignInReply:
+        return self._call(self._stub.BeginSignIn, app_pb2.SignInRequest(name=name), 30.0)
+
+    def finish_sign_in(self, name: str) -> app_pb2.Reply:
+        return self._call(self._stub.FinishSignIn, app_pb2.SignInRequest(name=name), SIGN_IN_TIMEOUT_S)
+
+    def models(self) -> app_pb2.ModelsReply:
+        return self._call(self._stub.Models, app_pb2.ModelsRequest())
+
+    def use_model(self, slot: str, connection: str, model: str) -> app_pb2.Reply:
+        return self._call(self._stub.UseModel, app_pb2.UseModelRequest(slot=slot, connection=connection, model=model))
+
+    def disconnect_model(self, name: str) -> app_pb2.Reply:
+        return self._call(self._stub.DisconnectModel, app_pb2.DisconnectModelRequest(name=name))
+
+    def test_model(self, slot: str, image: bytes = b"", media_type: str = "") -> app_pb2.ModelTextReply:
+        return self._call(self._stub.TestModel, app_pb2.TestModelRequest(slot=slot, image=image, media_type=media_type),
+                          MODEL_TIMEOUT_S)
+
+    def explain(self, job: str, run: int = 0, question: str = "") -> app_pb2.ModelTextReply:
+        return self._call(self._stub.Explain, app_pb2.ExplainRequest(job=job, run=run, question=question),
+                          MODEL_TIMEOUT_S)
+
+    def review_design(self, name: str, version: str = "", question: str = "") -> app_pb2.ModelTextReply:
+        return self._call(self._stub.ReviewDesign,
+                          app_pb2.ReviewDesignRequest(name=name, version=version, question=question), MODEL_TIMEOUT_S)
+
+    def compare_jobs(self, a: str, b: str) -> app_pb2.ModelTextReply:
+        return self._call(self._stub.CompareJobs, app_pb2.CompareJobsRequest(a=a, b=b))
+
+    def interpret_goal(self, node_id: str, text: str) -> app_pb2.InterpretGoalReply:
+        return self._call(self._stub.InterpretGoal, app_pb2.InterpretGoalRequest(node_id=node_id, text=text),
+                          MODEL_TIMEOUT_S)
 
     def watch(self) -> Iterator[app_pb2.HubEvent]:
         try:

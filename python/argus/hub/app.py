@@ -23,10 +23,13 @@ import grpc
 
 from argus.protocol.v1 import app_pb2, app_pb2_grpc, node_messages_pb2
 
+from . import advice, viewer
 from . import worlds as world_set
 from .designs import Bundle, DesignStore, DesignVersion, Finding
 from .gateway import Hub
 from .home import Home
+from .chatgpt import USAGE_PAGE
+from .models import CHATGPT, CLAUDE_CODE, REASONING, SLOTS, VISION, Image, Message, ModelError, Models
 from .places import Place, PlaceError, Route, Stop
 from .validation import RUNNING, Job, Validator
 
@@ -48,14 +51,17 @@ class Caller:
 
 
 # What each call does, for authorisation: "read" looks, "control" changes what robots do.
-# "change" alters what the hub stores.
+# "change" alters what the hub stores. "ask" sends data to a connected model.
 ACTIONS = {"status": "read", "robots": "read", "watch": "read", "designs": "read", "design": "read",
            "worlds": "read", "jobs": "read", "job": "read", "places": "read", "routes": "read",
            "go": "control", "patrol": "control",
            "add_place": "change", "remove_place": "change", "add_route": "change", "remove_route": "change",
            "goal": "control", "cancel": "control",
            "add_design": "change", "validate": "change", "cancel_job": "change", "keep_job": "change",
-           "delete_job": "change"}
+           "delete_job": "change", "models": "read", "connect_model": "change", "sign_in": "change",
+           "use_model": "change",
+           "disconnect_model": "change", "compare_jobs": "read", "test_model": "ask", "explain": "ask",
+           "review_design": "ask", "interpret_goal": "ask"}
 
 
 def local_caller() -> Caller:
@@ -211,6 +217,7 @@ class AppService(app_pb2_grpc.HubAppServicer):
         self.clock = clock
         self.started_at = clock()
         self.designs = DesignStore(home.designs)
+        self.models = Models(home.models_file)
         self.validator = Validator(home.jobs, self.designs,
                                    publish=lambda kind, job_id, detail: events.publish(kind, detail=detail,
                                                                                        job_id=job_id))
@@ -428,6 +435,161 @@ class AppService(app_pb2_grpc.HubAppServicer):
         return await self._places_change(
             context, "patrol", lambda: f"{request.node_id}: " + self.hub.patrol(request.node_id, request.route, self.clock()))
 
+    async def ConnectModel(self, request, context):
+        await self._caller(context, "connect_model")
+        name = request.name or request.kind
+        try:
+            c = await asyncio.to_thread(self.models.connect, name, request.kind, request.base_url, request.key)
+        except ValueError as e:
+            return app_pb2.Reply(ok=False, detail=str(e))
+        if c.kind == CLAUDE_CODE:
+            return app_pb2.Reply(ok=True, detail=(
+                f"{c.name}: Argus will run the Claude Code program on this machine under your own sign-in; "
+                "run logs, design files and images you ask about go to Anthropic and count against your usage. "
+                f"Use {c.name}/default, or any model name it accepts"))
+        where = (f"run logs, design files and images you ask about go to {c.base_url}" if c.remote
+                 else "it runs on this machine")
+        return app_pb2.Reply(ok=True, detail=f"{c.name}: {len(c.models)} models; {where}")
+
+    async def BeginSignIn(self, request, context):
+        await self._caller(context, "sign_in")
+        try:
+            url = await asyncio.to_thread(self.models.begin_sign_in, request.name or CHATGPT)
+        except ValueError as e:
+            return app_pb2.SignInReply(ok=False, detail=str(e))
+        return app_pb2.SignInReply(ok=True, url=url)
+
+    async def FinishSignIn(self, request, context):
+        await self._caller(context, "sign_in")
+        try:
+            c = await asyncio.to_thread(self.models.finish_sign_in, request.name or CHATGPT)
+        except ValueError as e:
+            return app_pb2.Reply(ok=False, detail=str(e))
+        return app_pb2.Reply(ok=True, detail=(
+            f"{c.name}: {len(c.models)} models on your ChatGPT plan; run logs, design files and images you ask "
+            f"about go to OpenAI and count against your plan. Sign in again after a hub restart. "
+            f"Usage: {USAGE_PAGE}"))
+
+    async def Models(self, request, context):
+        await self._caller(context, "models")
+        reply = app_pb2.ModelsReply()
+        for c in self.models.connections.values():
+            reply.connections.add(name=c.name, kind=c.kind, base_url=c.base_url, remote=c.remote,
+                                  needs_key=c.needs_key, models=c.models)
+        for slot in SLOTS:
+            name, model = self.models.slots.get(slot, ("", ""))
+            reply.slots.add(slot=slot, connection=name, model=model)
+        return reply
+
+    async def UseModel(self, request, context):
+        await self._caller(context, "use_model")
+        try:
+            self.models.use(request.slot, request.connection, request.model)
+        except ValueError as e:
+            return app_pb2.Reply(ok=False, detail=str(e))
+        return app_pb2.Reply(ok=True, detail=f"{request.slot}: {request.connection}/{request.model}")
+
+    async def DisconnectModel(self, request, context):
+        await self._caller(context, "disconnect_model")
+        try:
+            note = await asyncio.to_thread(self.models.disconnect, request.name)
+        except ValueError as e:
+            return app_pb2.Reply(ok=False, detail=str(e))
+        return app_pb2.Reply(ok=True, detail=f"{request.name}: {note or 'disconnected, its key or tokens forgotten'}")
+
+    async def _ask(self, slot: str, system: str, messages: list[Message], brief=None) -> app_pb2.ModelTextReply:
+        try:
+            text = await asyncio.to_thread(self.models.ask, slot, system, messages)
+        except ModelError as e:
+            return app_pb2.ModelTextReply(ok=False, detail=str(e))
+        return app_pb2.ModelTextReply(ok=True, text=advice.checked(text, brief) if brief else text,
+                                      model=self.models.describe(slot))
+
+    async def TestModel(self, request, context):
+        await self._caller(context, "test_model")
+        slot = request.slot or REASONING
+        if slot == VISION and request.image:
+            m = Message("user", "Say in one sentence what this image shows.",
+                        [Image(request.media_type or "image/png", request.image)])
+        else:
+            m = Message("user", "Reply with the single word: ready")
+        return await self._ask(slot, "", [m])
+
+    def _capability(self, job) -> str:
+        v = self.designs.get(job.design, job.version or None) if job.design else None
+        doc = self.designs.profile(v) if v is not None else None
+        if doc is None:
+            return ""
+        from argus.setup.report import capability_report
+
+        return capability_report(doc)
+
+    async def Explain(self, request, context):
+        await self._caller(context, "explain")
+        job = self.validator.jobs.get(request.job)
+        if job is None:
+            return app_pb2.ModelTextReply(ok=False, detail=f"no job {request.job!r} (or more than one starts so)")
+        if request.run:
+            run = next((r for r in job.runs if r.index == request.run), None)
+            if run is None:
+                return app_pb2.ModelTextReply(ok=False, detail=f"no run {request.run} in job {job.id}")
+            log_dir = self.validator.jobs.run_dir(job, run)
+            brief = await asyncio.to_thread(advice.run_brief, run, log_dir, viewer.timeline(log_dir, run.findings),
+                                            self._capability(job))
+            task = advice.EXPLAIN
+            lines = [f"{f['category']}: {f['sentence']}" for f in run.findings]
+        else:
+            brief, task = advice.job_brief(job), advice.EXPLAIN_JOB
+            lines = [f"{r.name}: {f['category']}: {f['sentence']}" for r in job.runs for f in r.findings]
+        if not self.models.filled(REASONING):
+            return app_pb2.ModelTextReply(ok=True, text="\n".join(lines or ["no findings"]),
+                                          detail="no reasoning model is connected, so these are the rule-based findings")
+        return await self._ask(REASONING, advice.GROUND_RULES, advice.prompt(brief, task, request.question), brief)
+
+    async def ReviewDesign(self, request, context):
+        await self._caller(context, "review_design")
+        v = self.designs.get(request.name, request.version or None)
+        if v is None:
+            return app_pb2.ModelTextReply(ok=False, detail=f"no design {request.name!r}")
+        doc = self.designs.profile(v)
+        report = ""
+        if doc is not None:
+            from argus.setup.report import capability_report
+
+            report = capability_report(doc)
+        jobs = await asyncio.to_thread(self.validator.jobs.all)
+        ran = [j for j in jobs if j.design == v.name and j.version == v.version]
+        brief = advice.design_brief(v, report, ran)
+        if not self.models.filled(REASONING):
+            return app_pb2.ModelTextReply(ok=True, text=brief.render(),
+                                          detail="no reasoning model is connected, so these are the measured facts alone")
+        return await self._ask(REASONING, advice.GROUND_RULES, advice.prompt(brief, advice.REVIEW, request.question), brief)
+
+    async def CompareJobs(self, request, context):
+        await self._caller(context, "compare_jobs")
+        a, b = self.validator.jobs.get(request.a), self.validator.jobs.get(request.b)
+        missing = [name for name, job in ((request.a, a), (request.b, b)) if job is None]
+        if missing:
+            return app_pb2.ModelTextReply(ok=False, detail=f"no job {missing[0]!r} (or more than one starts so)")
+        return app_pb2.ModelTextReply(ok=True, text=advice.compare_jobs(a, b))
+
+    async def InterpretGoal(self, request, context):
+        await self._caller(context, "interpret_goal")
+        robot = self.hub.registry.robot(request.node_id)
+        if robot is None:
+            return app_pb2.InterpretGoalReply(ok=False, detail=self._unknown(request.node_id))
+        book = self.hub.dispatch.book(robot.site_id)
+        places, routes = sorted(book.places()), sorted(book.routes())
+        if not places and not routes:
+            return app_pb2.InterpretGoalReply(ok=False, detail=f"site {robot.site_id} has no named places or routes yet")
+        system, messages = advice.goal_prompt(request.text, places, routes)
+        try:
+            answer = await asyncio.to_thread(self.models.ask, REASONING, system, messages)
+        except ModelError as e:
+            return app_pb2.InterpretGoalReply(ok=False, detail=str(e))
+        kind, name = advice.read_goal(answer, places, routes)
+        return app_pb2.InterpretGoalReply(ok=True, kind=kind, name=name, model=self.models.describe(REASONING))
+
     async def Watch(self, request, context):
         await self._caller(context, "watch")
         q = self.events.subscribe()
@@ -485,6 +647,7 @@ class AppServer:
             await asyncio.sleep(EVENT_POLL_S)
 
     async def stop(self) -> None:
+        self.service.models.cancel_sign_in()
         if self._poller:
             self._poller.cancel()
         if self._validator:

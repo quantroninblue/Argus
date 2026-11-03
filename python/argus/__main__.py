@@ -39,6 +39,17 @@
   jobs cancel|keep|unkeep|delete JOB
   runs show JOB RUN                one run: outcome, findings, timeline, log files
   runs replay JOB RUN              play a finished run back in Gazebo
+  runs explain JOB RUN [--ask Q]   why a run went as it did, from the reasoning model
+  jobs explain JOB [--ask Q]       what a job's runs show together
+  jobs compare A B                 two jobs run by run over the worlds they share
+  design review NAME[@VERSION]     suggestions for a design, tied to what was measured
+  models connect KIND [URL] [--name N] [--key-prompt]
+                                   add a model source: openai-compatible or anthropic
+  models list                      connections, their models and the slots
+  models use SLOT CONNECTION/MODEL fill the reasoning or vision slot
+  models test SLOT [--image FILE]  ask the model in a slot something small
+  models disconnect NAME           remove a connection and forget its key
+  say ROBOT "TEXT" [--yes]         send a robot somewhere in words, through the site's places
 
 Every hub command takes --home DIR (default ~/.local/share/argus, or ARGUS_HOME).
 """
@@ -47,6 +58,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+import webbrowser
 from pathlib import Path
 
 from argus import certs
@@ -175,6 +187,9 @@ def _packages(items) -> dict[str, Path] | None:
 def _design(hub, args) -> int:
     from argus.hub.client import format_design, format_findings
 
+    if args.action == "review":
+        name, _, version = args.design.partition("@")
+        return _model_text(hub.review_design(name, version, args.ask or ""))
     if args.action == "add":
         from argus.hub.designs import collect
         from argus.setup.urdf import UrdfError
@@ -248,9 +263,109 @@ def _follow(hub, job_id: str, view: bool) -> int:
     return 0
 
 
+def _model_text(reply) -> int:
+    """Prints what a model said, or the rule-based text when no model was used."""
+    if not reply.ok:
+        print(reply.detail, file=sys.stderr)
+        return 1
+    if reply.detail:
+        print(reply.detail, file=sys.stderr)
+    print(reply.text)
+    if reply.model:
+        print(f"\n(from {reply.model}: advice, check it against the findings)", file=sys.stderr)
+    return 0
+
+
+def _read_key() -> str:
+    import getpass
+
+    if sys.stdin.isatty():
+        return getpass.getpass("API key: ").strip()
+    return sys.stdin.readline().strip()
+
+
+def _sign_in(hub, name: str) -> int:
+    started = hub.begin_sign_in(name)
+    if not started.ok:
+        print(started.detail, file=sys.stderr)
+        return 1
+    print(f"Sign in to ChatGPT in your browser. If it does not open, open this on this machine:\n{started.url}",
+          flush=True)
+    try:
+        webbrowser.open(started.url)
+    except webbrowser.Error:
+        pass
+    reply = hub.finish_sign_in(name)
+    print(reply.detail, file=sys.stdout if reply.ok else sys.stderr)
+    return 0 if reply.ok else 1
+
+
+def _models(hub, args) -> int:
+    if args.action == "connect" and args.kind == "chatgpt" and not (args.url or args.key_prompt):
+        return _sign_in(hub, args.name or args.kind)
+    if args.action == "connect":
+        reply = hub.connect_model(args.name or args.kind, args.kind, args.url or "", _read_key() if args.key_prompt else "")
+    elif args.action == "use":
+        connection, _, model = args.model.partition("/")
+        if not model:
+            print("name the model as CONNECTION/MODEL", file=sys.stderr)
+            return 1
+        reply = hub.use_model(args.slot, connection, model)
+    elif args.action == "disconnect":
+        reply = hub.disconnect_model(args.name)
+    elif args.action == "test":
+        image = Path(args.image).read_bytes() if args.image else b""
+        media = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp"}.get(
+            Path(args.image).suffix.lower(), "image/png") if args.image else ""
+        return _model_text(hub.test_model(args.slot, image, media))
+    else:
+        listed = hub.models()
+        if not listed.connections:
+            print("no models connected; the hub runs on its rule-based tier (argus models connect)")
+        for c in listed.connections:
+            again = "sign-in needed: connect again" if c.kind == "chatgpt" else "key needed: connect again"
+            state = again if c.needs_key else ("remote" if c.remote else "this machine")
+            print(f"{c.name}  {c.kind}  {c.base_url or 'the installed program'}  ({state})")
+            for m in c.models:
+                print(f"  {m}")
+            if c.kind == "claude-code":
+                print("  default, or any model name it accepts")
+        for s in listed.slots:
+            print(f"{s.slot}: {s.connection + '/' + s.model if s.connection else 'empty'}")
+        return 0
+    print(reply.detail, file=sys.stdout if reply.ok else sys.stderr)
+    return 0 if reply.ok else 1
+
+
+def _say(hub, args) -> int:
+    reply = hub.interpret_goal(args.robot, args.text)
+    if not reply.ok:
+        print(reply.detail, file=sys.stderr)
+        return 1
+    if reply.kind == "unclear":
+        print(f"not sent: {reply.name}", file=sys.stderr)
+        return 1
+    what = f"go to {reply.name}" if reply.kind == "place" else f"run route {reply.name}"
+    print(f"{args.robot}: {what} (read by {reply.model})")
+    if not args.yes:
+        if not sys.stdin.isatty():
+            print("not sent: confirm with --yes when not at a terminal", file=sys.stderr)
+            return 1
+        if input("send it? [y/N] ").strip().lower() not in ("y", "yes"):
+            print("not sent")
+            return 0
+    sent = hub.go(args.robot, reply.name) if reply.kind == "place" else hub.patrol(args.robot, reply.name)
+    print(sent.detail, file=sys.stdout if sent.ok else sys.stderr)
+    return 0 if sent.ok else 1
+
+
 def _jobs(hub, args) -> int:
     from argus.hub.client import format_job_line, format_report
 
+    if args.action == "explain":
+        return _model_text(hub.explain(args.job, 0, args.ask or ""))
+    if args.action == "compare":
+        return _model_text(hub.compare_jobs(args.a, args.b))
     if args.action == "list":
         reply = hub.jobs()
         if not reply.jobs:
@@ -291,6 +406,8 @@ def _runs(hub, args) -> int:
         print(f"no run {args.run!r} in job {reply.job.id}; runs are numbered 1 to {len(reply.job.runs)}",
               file=sys.stderr)
         return 1
+    if args.action == "explain":
+        return _model_text(hub.explain(reply.job.id, run.index, args.ask or ""))
     log_dir = Path(run.log_dir)
     findings = [{"category": f.category, "sentence": f.sentence, "time_s": [f.from_s, f.to_s] if f.has_time else None}
                 for f in run.findings]
@@ -403,6 +520,10 @@ def _client(args) -> int:
                 return _places(hub, args)
             if args.command == "runs":
                 return _runs(hub, args)
+            if args.command == "models":
+                return _models(hub, args)
+            if args.command == "say":
+                return _say(hub, args)
             if args.command == "worlds":
                 reply = hub.worlds()
                 for w in reply.worlds:
@@ -542,6 +663,9 @@ def main(argv: list[str] | None = None) -> int:
     design_actions.add_parser("list", parents=[home], help="every design and its versions")
     show = design_actions.add_parser("show", parents=[home], help="a design's findings and capability report")
     show.add_argument("design", help="NAME or NAME@VERSION (a version prefix is enough)")
+    a = design_actions.add_parser("review", parents=[home], help="suggestions tied to what was measured")
+    a.add_argument("design", help="NAME or NAME@VERSION")
+    a.add_argument("--ask", help="a question to go with it")
     place = sub.add_parser("place", help="named places in a site")
     place_actions = place.add_subparsers(dest="action", required=True)
     a = place_actions.add_parser("add", parents=[home], help="a place by its coordinates in the site frame")
@@ -604,13 +728,42 @@ def main(argv: list[str] | None = None) -> int:
         a.add_argument("job", help="the job's id, or the start of it")
         if name == "watch":
             a.add_argument("--view", action="store_true", help="open Gazebo on each run as it goes live")
+    a = job_actions.add_parser("explain", parents=[home], help="what a job's runs show together")
+    a.add_argument("job", help="the job's id, or the start of it")
+    a.add_argument("--ask", help="a question to go with it")
+    a = job_actions.add_parser("compare", parents=[home], help="two jobs run by run over the worlds they share")
+    a.add_argument("a", help="the first job")
+    a.add_argument("b", help="the second job")
     runs = sub.add_parser("runs", help="runs of a validation job")
     run_actions = runs.add_subparsers(dest="action", required=True)
     for name, text in (("show", "outcome, findings, timeline and log files"),
-                       ("replay", "play a finished run back in Gazebo")):
+                       ("replay", "play a finished run back in Gazebo"),
+                       ("explain", "why a run went as it did, from the reasoning model")):
         a = run_actions.add_parser(name, parents=[home], help=text)
         a.add_argument("job", help="the job's id, or the start of it")
         a.add_argument("run", help="the run's number, or its name")
+        if name == "explain":
+            a.add_argument("--ask", help="a question to go with it")
+    models = sub.add_parser("models", help="where models come from and what Argus uses them for")
+    model_actions = models.add_subparsers(dest="action", required=True)
+    a = model_actions.add_parser("connect", parents=[home], help="add a model source, or give one its key again")
+    a.add_argument("kind", help="openai-compatible, anthropic, chatgpt or claude-code")
+    a.add_argument("url", nargs="?", help="the endpoint's address (openai-compatible)")
+    a.add_argument("--name", help="what to call it (default: the kind)")
+    a.add_argument("--key-prompt", action="store_true", help="ask for an API key; it stays in the hub's memory only")
+    model_actions.add_parser("list", parents=[home], help="connections, their models and the slots")
+    a = model_actions.add_parser("use", parents=[home], help="fill a slot")
+    a.add_argument("slot", help="reasoning or vision")
+    a.add_argument("model", help="CONNECTION/MODEL")
+    a = model_actions.add_parser("test", parents=[home], help="ask the model in a slot something small")
+    a.add_argument("slot", help="reasoning or vision")
+    a.add_argument("--image", help="an image file for the vision slot")
+    a = model_actions.add_parser("disconnect", parents=[home], help="remove a connection and forget its key or tokens")
+    a.add_argument("name")
+    a = sub.add_parser("say", parents=[home], help="send a robot somewhere in words, through the site's places")
+    a.add_argument("robot")
+    a.add_argument("text", help="the instruction")
+    a.add_argument("--yes", action="store_true", help="send it without asking")
     if not argv:
         p.print_help()
         return 0
@@ -625,7 +778,7 @@ def main(argv: list[str] | None = None) -> int:
         print(branding.banner() + "\n")
         return run.start(args.home, args.listen, args.intake)
     if args.command in ("status", "robots", "goal", "cancel", "watch", "design", "worlds", "validate", "jobs", "runs",
-                        "place", "route", "go", "patrol"):
+                        "place", "route", "go", "patrol", "models", "say"):
         return _client(args)
     return _certs(args) if args.command == "certs" else _setup(args)
 

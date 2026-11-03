@@ -328,6 +328,101 @@ message PatrolRequest {
   string route = 2;  // a route in the robot's site
 }
 
+// Model connections and slots. A key goes up once and is never sent back or written to disk.
+message ConnectModelRequest {
+  string name = 1;
+  string kind = 2;      // openai-compatible, anthropic, claude-code
+  string base_url = 3;  // empty for the provider's own address
+  string key = 4;
+}
+
+// ChatGPT sign-in happens in the person's browser against a listener on the hub, so that tokens
+// never cross this interface.
+message SignInRequest {
+  string name = 1;
+}
+
+message SignInReply {
+  bool ok = 1;
+  string detail = 2;
+  string url = 3;  // to open in a browser
+}
+
+message ModelsRequest {}
+
+message ModelConnection {
+  string name = 1;
+  string kind = 2;
+  string base_url = 3;
+  bool remote = 4;      // data sent to it leaves this machine
+  bool needs_key = 5;   // the hub restarted; connect again with the key or sign in again
+  repeated string models = 6;
+}
+
+message ModelSlot {
+  string slot = 1;
+  string connection = 2;  // empty when nothing fills the slot
+  string model = 3;
+}
+
+message ModelsReply {
+  repeated ModelConnection connections = 1;
+  repeated ModelSlot slots = 2;
+}
+
+message UseModelRequest {
+  string slot = 1;
+  string connection = 2;
+  string model = 3;
+}
+
+message DisconnectModelRequest { string name = 1; }
+
+message TestModelRequest {
+  string slot = 1;
+  bytes image = 2;
+  string media_type = 3;
+}
+
+// What a model said. `model` is empty when no model was used and `text` is the rule-based tier.
+message ModelTextReply {
+  bool ok = 1;
+  string detail = 2;
+  string text = 3;
+  string model = 4;
+}
+
+message ExplainRequest {
+  string job = 1;
+  uint32 run = 2;  // 0 for the whole job
+  string question = 3;
+}
+
+message ReviewDesignRequest {
+  string name = 1;
+  string version = 2;
+  string question = 3;
+}
+
+message CompareJobsRequest {
+  string a = 1;
+  string b = 2;
+}
+
+message InterpretGoalRequest {
+  string node_id = 1;
+  string text = 2;
+}
+
+// What an instruction in words means here. Nothing moves until the caller sends Go or Patrol.
+message InterpretGoalReply {
+  bool ok = 1;
+  string detail = 2;
+  string kind = 3;  // place, route, or unclear
+  string name = 4;
+  string model = 5;
+}
+
 service HubApp {
   rpc Status(StatusRequest) returns (HubStatus);
   rpc Robots(RobotsRequest) returns (RobotsReply);
@@ -354,4 +449,15 @@ service HubApp {
   rpc RemoveRoute(RemoveRequest) returns (Reply);
   rpc Go(GoRequest) returns (Reply);
   rpc Patrol(PatrolRequest) returns (Reply);
+  rpc ConnectModel(ConnectModelRequest) returns (Reply);
+  rpc BeginSignIn(SignInRequest) returns (SignInReply);
+  rpc FinishSignIn(SignInRequest) returns (Reply);
+  rpc Models(ModelsRequest) returns (ModelsReply);
+  rpc UseModel(UseModelRequest) returns (Reply);
+  rpc DisconnectModel(DisconnectModelRequest) returns (Reply);
+  rpc TestModel(TestModelRequest) returns (ModelTextReply);
+  rpc Explain(ExplainRequest) returns (ModelTextReply);
+  rpc ReviewDesign(ReviewDesignRequest) returns (ModelTextReply);
+  rpc CompareJobs(CompareJobsRequest) returns (ModelTextReply);
+  rpc InterpretGoal(InterpretGoalRequest) returns (InterpretGoalReply);
 }

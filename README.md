@@ -98,9 +98,9 @@ of every drive type, which must stay safe:
 4. Next, for the first release: named places and routes, the hub correcting odometry drift
    against its map, Argo stopping and reporting when its way is blocked so the hub can
    re-route, and models on the hub (local or remotely hosted): explaining failed runs,
-   reviewing designs, labelling what robots see, and goals given in words.
-5. Then: first runs on real hardware (Vicharak Axon), a graphical interface for the hub, and
-   publishing on PyPI.
+   reviewing designs and goals given in words.
+5. Then: labelling what robots see, first runs on real hardware (Vicharak Axon), a graphical
+   interface for the hub, and publishing on PyPI.
 
 ## Known issues
 
@@ -112,8 +112,15 @@ of every drive type, which must stay safe:
   applies.
 - The car-like body in Gazebo fails now and then (1 run in 8): its odometry drifts and it loops
   near the goal. The hub's drift correction is the fix.
-- The hub's site frame is the odometry frame of the robot until drift correction lands:
-  start a robot where the site's origin is.
+- The hub corrects odometry drift against surfaces it already knows, in x, y and yaw, and closes
+  loops when a robot comes back to somewhere it has been. Heavy drift can still beat it: in
+  simulation it held up to about 0.005 rad/s and not at 0.0075 rad/s. A closure lines a robot up
+  with the map, so a first pass that went badly wrong stays wrong. It cannot find a robot started
+  away from the site's origin: start robots there. A corridor corrects across its width, not along
+  its length. On clean odometry it can sit up to one map cell (0.1 m) off the truth, so a robot
+  may stop that much outside a place's tolerance.
+- Loop closure has not been run in Gazebo yet, and its search can hold up the hub for a moment
+  while it runs. Named places are not moved by a closure.
 
 ## Building
 
@@ -122,7 +129,8 @@ Tested on Ubuntu 24.04.
 ```sh
 sudo apt install cmake g++ libeigen3-dev libyaml-cpp-dev libprotobuf-dev protobuf-compiler \
     libgrpc++-dev protobuf-compiler-grpc libgtest-dev pybind11-dev python3-dev python3-yaml \
-    python3-jsonschema python3-protobuf python3-grpcio python3-numpy python3-pytest openssl
+    python3-jsonschema python3-protobuf python3-grpcio python3-numpy python3-pytest python3-jwt \
+    python3-cryptography openssl
 tools/check.sh
 ```
 
@@ -423,6 +431,26 @@ argus runs replay JOB 3     # play the run back in Gazebo, with play, pause and 
 Every run is recorded, so any finished run, failed or not, can be watched again. The hub
 keeps the newest 10 jobs; `argus jobs keep JOB` keeps one for good, and `argus jobs delete
 JOB` frees its space. Jobs live in `jobs/` in the hub's home.
+
+## Connecting a model
+
+Models are optional. Without one, the hub gives its rule-based findings. With one, it can explain a
+failed run in words, review a design, and turn an instruction into a trip to a named place. A model's
+answer is advice: it cannot change a profile or a limit, and Argo never waits on one.
+
+```sh
+argus models connect openai-compatible http://localhost:11434/v1 --name local   # Ollama, llama.cpp
+argus models connect anthropic --key-prompt      # an API key, kept in the hub's memory only
+argus models connect chatgpt                     # sign in to your own ChatGPT plan in your browser
+argus models connect claude-code                 # runs your installed Claude Code under your own sign-in
+argus models use reasoning local/llama3.2
+argus runs explain JOB 3 --ask "why did it stop at the gap?"
+```
+
+Anything from Gemini, OpenRouter or another OpenAI-compatible service connects the same way as the
+first line, with `--key-prompt`. Keys and tokens are never written to disk, so a restarted hub asks
+for them again. [docs/data.md](docs/data.md) lists what each command sends where. All commands are in
+[docs/cli.md](docs/cli.md).
 
 ## Certificates
 

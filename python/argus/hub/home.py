@@ -67,6 +67,10 @@ class Home:
         return self.root / "jobs"
 
     @property
+    def models_file(self) -> Path:
+        return self.root / "models.yaml"
+
+    @property
     def run_dir(self) -> Path:
         return self.root / "run"
 
