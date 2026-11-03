@@ -3,9 +3,12 @@
 #include <pybind11/stl.h>
 
 #include <limits>
+#include <tuple>
+#include <vector>
 
 #include "argus/capabilities/capabilities.hpp"
 #include "argus/capabilities/profile.hpp"
+#include "argus/sitemap/pose_graph.hpp"
 #include "argus/sitemap/route.hpp"
 #include "argus/sitemap/site_map.hpp"
 
@@ -68,6 +71,79 @@ PYBIND11_MODULE(sitemap, m) {
       },
       py::arg("deltas"), "Encode [((x, y, z), delta), ...] as a LocalEvidence payload.");
 
+  m.def(
+      "decode_evidence",
+      [](const py::bytes& payload) {
+        const auto deltas = argus::grid::decode_evidence(std::string(payload));
+        const auto n = static_cast<py::ssize_t>(deltas.size());
+        py::array_t<int32_t> cells({n, py::ssize_t(3)});
+        py::array_t<int32_t> values(n);
+        auto c = cells.mutable_unchecked<2>();
+        auto v = values.mutable_unchecked<1>();
+        for (py::ssize_t k = 0; k < n; ++k) {
+          const auto& d = deltas[static_cast<size_t>(k)];
+          c(k, 0) = d.index.x();
+          c(k, 1) = d.index.y();
+          c(k, 2) = d.index.z();
+          v(k) = d.delta;
+        }
+        return py::make_tuple(cells, values);
+      },
+      py::arg("payload"),
+      "Decode a LocalEvidence payload into (cells int32 [N, 3], deltas int32 [N]). ValueError if "
+      "malformed.");
+
+  m.def(
+      "encode_evidence_arrays",
+      [](const py::array_t<int32_t, py::array::c_style | py::array::forcecast>& cells,
+         const py::array_t<int32_t, py::array::c_style | py::array::forcecast>& values) {
+        if (cells.ndim() != 2 || cells.shape(1) != 3 || values.ndim() != 1 ||
+            values.shape(0) != cells.shape(0)) {
+          throw py::value_error("cells must be N x 3 with one delta per row");
+        }
+        auto c = cells.unchecked<2>();
+        auto v = values.unchecked<1>();
+        std::vector<CellDelta> in(static_cast<size_t>(c.shape(0)));
+        for (py::ssize_t k = 0; k < c.shape(0); ++k) {
+          in[static_cast<size_t>(k)] = {Index3(c(k, 0), c(k, 1), c(k, 2)), v(k)};
+        }
+        return py::bytes(argus::grid::encode_evidence(in));
+      },
+      py::arg("cells"), py::arg("deltas"),
+      "Encode cells [N, 3] and deltas [N] as a LocalEvidence payload. Repeated cells are summed.");
+
+  m.def(
+      "optimize_pose_graph",
+      [](const std::vector<std::tuple<double, double, double, bool>>& nodes,
+         const std::vector<std::tuple<int, int, double, double, double, double, double, bool>>& edges,
+         int max_iterations, double dcs_phi) {
+        std::vector<PoseNode> in_nodes;
+        in_nodes.reserve(nodes.size());
+        for (const auto& [x, y, yaw, fixed] : nodes) {
+          in_nodes.push_back({x, y, yaw, fixed});
+        }
+        std::vector<PoseEdge> in_edges;
+        in_edges.reserve(edges.size());
+        for (const auto& [from, to, dx, dy, dyaw, sigma_m, sigma_rad, robust] : edges) {
+          in_edges.push_back({from, to, dx, dy, dyaw, sigma_m, sigma_rad, robust});
+        }
+        PoseGraphResult r;
+        try {
+          r = optimize_pose_graph(in_nodes, in_edges, max_iterations, dcs_phi);
+        } catch (const std::invalid_argument& e) {
+          throw py::value_error(e.what());
+        }
+        std::vector<std::tuple<double, double, double>> poses;
+        poses.reserve(r.nodes.size());
+        for (const PoseNode& p : r.nodes) {
+          poses.emplace_back(p.x, p.y, p.yaw);
+        }
+        return py::make_tuple(poses, r.weights, r.iterations, r.chi2, r.converged);
+      },
+      py::arg("nodes"), py::arg("edges"), py::arg("max_iterations") = 50, py::arg("dcs_phi") = 1.0,
+      "Solve a 2D pose graph. nodes: [(x, y, yaw, fixed)]; edges: [(from, to, dx, dy, dyaw, sigma_m, "
+      "sigma_rad, robust)]. Returns (poses, weights, iterations, chi2, converged).");
+
   py::class_<SiteMap>(m, "SiteMap")
       .def(py::init<std::string, double, uint64_t>(), py::arg("site_id"),
            py::arg("resolution_m") = 0.1, py::arg("epoch") = 1)
@@ -77,6 +153,25 @@ PYBIND11_MODULE(sitemap, m) {
       .def_property_readonly("version", &SiteMap::version)
       .def_property_readonly("tile_count", &SiteMap::tile_count)
       .def("reset", &SiteMap::reset)
+      .def(
+          "observed_cells",
+          [](const SiteMap& self) {
+            const auto deltas = self.observed_cells();
+            const auto n = static_cast<py::ssize_t>(deltas.size());
+            py::array_t<int32_t> cells({n, py::ssize_t(3)});
+            py::array_t<int32_t> values(n);
+            auto c = cells.mutable_unchecked<2>();
+            auto v = values.mutable_unchecked<1>();
+            for (py::ssize_t k = 0; k < n; ++k) {
+              const auto& d = deltas[static_cast<size_t>(k)];
+              c(k, 0) = d.index.x();
+              c(k, 1) = d.index.y();
+              c(k, 2) = d.index.z();
+              v(k) = d.delta;
+            }
+            return py::make_tuple(cells, values);
+          },
+          "Observed cells [N, 3] and their log-odds [N].")
       .def(
           "apply_evidence",
           [](SiteMap& map, uint64_t epoch, const py::bytes& payload, double stamp) {

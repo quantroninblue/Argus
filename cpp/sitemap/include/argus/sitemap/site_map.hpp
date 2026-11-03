@@ -74,6 +74,9 @@ class SiteMap {
   // grid::SearchGrid::linear.
   std::vector<Cell> coarse_view(int factor, const Index3& lo, const Index3& hi) const;
 
+  // Every observed cell with its log-odds as the delta, so a map can be replayed into another.
+  std::vector<CellDelta> observed_cells() const;
+
   // Tiles changed after `version`, for map deltas.
   std::vector<Index3> changed_since(uint64_t version) const;
 

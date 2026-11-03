@@ -65,6 +65,25 @@ Cell SiteMap::cell(const Index3& index) const {
   return grid::cell_state(it->second.observed[k] != 0, it->second.log_odds[k]);
 }
 
+std::vector<CellDelta> SiteMap::observed_cells() const {
+  std::vector<CellDelta> out;
+  for (const auto& [key, tile] : tiles_) {
+    const Index3 origin = key * kTileSize;
+    for (int z = 0; z < kTileSize; ++z) {
+      for (int y = 0; y < kTileSize; ++y) {
+        for (int x = 0; x < kTileSize; ++x) {
+          const Index3 index = origin + Index3(x, y, z);
+          const int k = grid::offset_in_tile(index);
+          if (tile.observed[k] != 0) {
+            out.push_back({index, tile.log_odds[k]});
+          }
+        }
+      }
+    }
+  }
+  return out;
+}
+
 bool SiteMap::bounds(Index3& lo, Index3& hi) const {
   if (tiles_.empty()) {
     return false;

@@ -4,6 +4,7 @@ numbers it, resends what the hub has not acknowledged and sends no more than its
 import numpy as np
 
 from argus import profile as profiles
+from argus.hub.drift import DriftConfig
 from argus.hub.intake import IntakeConfig
 from argus.hub.session import HubConfig
 from argus.protocol.v1 import link_pb2
@@ -58,7 +59,9 @@ def test_evidence_seen_while_disconnected_reaches_the_hub_afterwards():
 
 def test_argo_keeps_to_the_hub_budget_and_the_backlog_drains():
     doc = _example("planar_differential")
-    config = HubConfig(intake=IntakeConfig(bytes_per_s=12_000.0, min_burst_bytes=8_000.0))
+    # Drift correction off: this compares the hub's cells with Argo's one for one.
+    config = HubConfig(intake=IntakeConfig(bytes_per_s=12_000.0, min_burst_bytes=8_000.0),
+                       drift=DriftConfig(enabled=False))
     loop = HubLoop(doc, worlds.wall_with_gap(), (0.0, 0.0, 0.0, 0.0), (5.0, 2.0, 0.0), 0.4,
                    hub_config=config)
     _run(loop, 60.0)

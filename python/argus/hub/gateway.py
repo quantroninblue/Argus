@@ -58,8 +58,9 @@ class Hub:
     def __init__(self, registry: Registry, sites: SiteService | None = None,
                  config: HubConfig | None = None, sites_dir=None) -> None:
         self.registry = registry
-        self.sites = sites or SiteService()
         self.config = config or HubConfig()
+        self.sites = sites or SiteService(loops=self.config.loops, merge_m=self.config.drift.merge_m,
+                                         settle_s=self.config.drift.settle_s)
         self.sessions: dict[str, HubSession] = {}
         self.intake = Intake(self.config.intake)
         # Named places, routes and errands (hub plan N1); places live in `sites_dir`.

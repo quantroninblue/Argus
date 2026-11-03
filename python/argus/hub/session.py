@@ -14,6 +14,8 @@ import time
 from dataclasses import dataclass, field
 
 from argus import sitemap
+from argus.hub.drift import DriftConfig, DriftEstimator
+from argus.hub.loops import LoopConfig
 from argus.hub.intake import IntakeConfig
 from argus.hub.mission import MissionConfig, MissionManager, MissionState
 from argus.hub.registry import Profile, Robot
@@ -32,6 +34,9 @@ class HubConfig:
     # How much map evidence the hub takes in (intake.py). Measured offers: about 40 KB/s for a
     # ground robot, 620 KB/s for a drone while moving.
     intake: IntakeConfig = field(default_factory=IntakeConfig)
+    # Odometry drift correction (drift.py).
+    drift: DriftConfig = field(default_factory=DriftConfig)
+    loops: LoopConfig = field(default_factory=LoopConfig)
 
 
 def nanos(seconds: float) -> int:
@@ -64,7 +69,14 @@ class HubSession:
         self.session_id = ""
         self.generation = 0
         self.node_generation = 0
+        # Pose in the site frame; Argo reports it in odometry (`odom_pose`), and the drift
+        # correction maps one to the other. Waypoints go back into odometry when sent.
         self.pose: tuple[float, float, float] | None = None
+        self.odom_pose: tuple[float, float, float] | None = None
+        self.odom_yaw = 0.0
+        self._closures_seen = 0
+        self.drift = DriftEstimator(config.drift, sites.resolution_m) if config.drift.enabled else None
+        self._drift_at_plan = (0.0, 0.0, 0.0)
         self.safety = node_messages_pb2.SAFETY_STATE_UNSPECIFIED
         self.link_state = node_messages_pb2.LINK_STATE_UNSPECIFIED
         self.failsafe = False
@@ -162,7 +174,10 @@ class HubSession:
         elif body == "telemetry":
             t = m.telemetry
             p = t.pose_map.position
-            self.pose = (p.x, p.y, p.z)
+            self.odom_pose = (p.x, p.y, p.z)
+            q = t.pose_map.orientation
+            self.odom_yaw = math.atan2(2.0 * (q.w * q.z + q.x * q.y), 1.0 - 2.0 * (q.y * q.y + q.z * q.z))
+            self.pose = self.drift.point_to_map(self.odom_pose) if self.drift else self.odom_pose
             self.safety = t.safety
             self.link_state = t.link.state
             self.node_generation = max(self.node_generation, t.plan_generation)
@@ -181,7 +196,8 @@ class HubSession:
                 self.evidence_dropped += 1
             else:
                 started = time.perf_counter()
-                if self.sites.apply(self.robot.site_id, m.local_evidence):
+                if self.sites.apply(self.robot.site_id, m.local_evidence, self.drift, now, self.odom_pose,
+                                    self.robot.node_id, self.odom_yaw):
                     self.evidence_seen = True
                 self._evidence_cpu_s += time.perf_counter() - started
         elif body == "event":
@@ -207,6 +223,7 @@ class HubSession:
             return
         if self.pose is None or not self.evidence_seen or now - self.last_heard > self.config.silent_after_s:
             return
+        self._update_drift(now)
         waypoints = self.mission.update(now, self.pose, self.site_map)
         if waypoints:
             self._send_plan(waypoints, now)
@@ -220,6 +237,26 @@ class HubSession:
         elif state == MissionState.ACTIVE:
             self._stop_sent_for = None
 
+    def _update_drift(self, now: float) -> None:
+        d = self.drift
+        if d is None:
+            return
+        closures = self.sites.closures(self.robot.site_id)
+        if closures != self._closures_seen:
+            # The site's frame moved under this robot: its map, correction and plan all changed.
+            self._closures_seen = closures
+            if self.odom_pose is not None:
+                self.pose = d.point_to_map(self.odom_pose)
+            self.mission.resend()
+        if not d.update(now, self.sites.surfaces(self.robot.site_id), self.site_map):
+            return
+        self.pose = d.point_to_map(self.odom_pose)
+        # Waypoints already sent were put into odometry with the old correction.
+        x0, y0, yaw0 = self._drift_at_plan
+        moved = math.hypot(d.x - x0, d.y - y0) + abs(d.yaw - yaw0) * self.config.mission.max_leg_m
+        if moved >= self.config.drift.resend_after_m:
+            self.mission.resend()
+
     def _send_plan(self, waypoints, now: float) -> None:
         self.generation = max(self.generation, self.node_generation) + 1
         m = link_pb2.HubMessage()
@@ -229,10 +266,13 @@ class HubSession:
         plan.expires.unix_nanos = nanos(now + self.config.mission.plan_expiry_s)
         plan.map_epoch = self.site_map.epoch
         plan.on_complete = hub_messages_pb2.PLAN_END_ACTION_STOP
+        if self.drift is not None:
+            self._drift_at_plan = (self.drift.x, self.drift.y, self.drift.yaw)
         for w in waypoints:
             out = plan.waypoints.add()
             out.id = w.id
-            out.pose.position.x, out.pose.position.y, out.pose.position.z = w.position
+            position = self.drift.point_to_odom(w.position) if self.drift else w.position
+            out.pose.position.x, out.pose.position.y, out.pose.position.z = position
             out.pose.orientation.w = 1.0
             out.position_tolerance_m = w.tolerance_m
             out.yaw_free = True

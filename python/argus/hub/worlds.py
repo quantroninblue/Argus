@@ -6,9 +6,9 @@ goal, used to size the run's time, and people who walk through it when a job ask
 moving bodies.
 
 Each world is moved so the run's start is at the origin, facing along x. A robot's odometry
-starts at zero where the robot starts, and until the hub corrects odometry against its map
-(drift correction, planned) the site frame is the odometry frame, as on a real robot started
-in a new site.
+starts at zero where the robot starts, and the hub takes that as the site frame, as on a real
+robot started in a new site. Its drift correction only reaches a short way, so it cannot find
+a robot started somewhere else.
 
 What a world holds is the user's choice per job (decisions, 2026-11-01):
 - "objects": the world as shipped, its walls and boxes;

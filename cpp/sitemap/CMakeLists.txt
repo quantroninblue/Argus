@@ -1,10 +1,10 @@
-add_library(argus_sitemap src/site_map.cpp src/route.cpp)
+add_library(argus_sitemap src/site_map.cpp src/route.cpp src/pose_graph.cpp)
 target_include_directories(argus_sitemap PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_libraries(argus_sitemap PUBLIC argus_grid argus_capabilities)
 target_compile_options(argus_sitemap PRIVATE -Wall -Wextra -Wpedantic)
 
 if(ARGUS_BUILD_TESTS)
-  add_executable(argus_sitemap_tests tests/test_site_map.cpp)
+  add_executable(argus_sitemap_tests tests/test_site_map.cpp tests/test_pose_graph.cpp)
   target_link_libraries(argus_sitemap_tests PRIVATE argus_sitemap argus_node GTest::gtest_main)
   gtest_discover_tests(argus_sitemap_tests)
 endif()
