@@ -471,7 +471,7 @@ def _places(hub, args) -> int:
         reply = hub.patrol(args.robot, args.route)
     elif args.command == "place" and args.action == "list":
         for site in hub.places(args.site or "").sites:
-            print(branding.heading(site))
+            print(branding.heading(site.site))
             for pl in site.places:
                 heading = f", heading {pl.heading_rad:.2f} rad" if pl.has_heading else ""
                 print(f"  {pl.name:<16} {pl.x:7.2f} {pl.y:7.2f} {pl.z:6.2f}  within {pl.tolerance_m:g} m{heading}")
@@ -480,7 +480,7 @@ def _places(hub, args) -> int:
         return 0
     elif args.command == "route" and args.action == "list":
         for site in hub.routes(args.site or "").sites:
-            print(branding.heading(site))
+            print(branding.heading(site.site))
             for r in site.routes:
                 stops = ", ".join(f"{st.place}" + (f" ({st.dwell_s:g} s)" if st.dwell_s else "") for st in r.stops)
                 times = f" x{r.cycles}" if r.cycles else ""

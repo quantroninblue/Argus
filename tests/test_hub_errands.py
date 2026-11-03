@@ -144,6 +144,7 @@ def test_places_and_routes_through_the_command(running_hub, capsys):  # noqa: F8
     assert main(["route", "list", "lab"] + home) == 0
     out = capsys.readouterr().out
     assert "shelf" in out and "dock" in out and "rounds" in out
+    assert "stops {" not in out and "places {" not in out and 'site: "lab"' not in out
     assert main(["go", "rover-1", "nowhere"] + home) == 1
     assert "nowhere" in capsys.readouterr().err
     assert main(["go", "rover-1", "shelf"] + home) == 0
