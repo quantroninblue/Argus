@@ -1,4 +1,6 @@
 #include <cmath>
+#include <fstream>
+#include <sstream>
 #include <string>
 
 #include <gtest/gtest.h>
@@ -156,4 +158,71 @@ TEST(Capabilities, OneScanPlaneSeesTheWholeBodyHeightOnlyUnderADeclaredObstacleH
   EXPECT_NE(bin_at(tall.sensing, 0.0).full_height_from_m, kNever);
   EXPECT_DOUBLE_EQ(tall.assumed_obstacle_height_m, 0.50);
   EXPECT_DOUBLE_EQ(tall.min_obstacle_height_m, 0.05);
+}
+
+namespace {
+
+std::string example_text(const std::string& name) {
+  std::ifstream in(std::string(ARGUS_EXAMPLES_DIR) + "/" + name);
+  std::stringstream ss;
+  ss << in.rdbuf();
+  return ss.str();
+}
+
+std::string replace_once(std::string text, const std::string& from, const std::string& to) {
+  const size_t at = text.find(from);
+  EXPECT_NE(at, std::string::npos) << from;
+  return at == std::string::npos ? text : text.replace(at, from.size(), to);
+}
+
+}  // namespace
+
+TEST(Capabilities, ADroneThatCannotSeeUpMustDeclareHowHighItMayFly) {
+  const std::string text = example_text("aerial_multirotor.yaml");
+  const Capabilities declared = derive_capabilities(load_profile_text(text));
+  EXPECT_FALSE(declared.sees_above);
+  EXPECT_DOUBLE_EQ(declared.max_flight_height_m, 2.5);
+  EXPECT_TRUE(declared.safety_ready);
+
+  const Capabilities missing =
+      derive_capabilities(load_profile_text(replace_once(text, "  max_flight_height_m: 2.5\n", "")));
+  EXPECT_FALSE(missing.safety_ready);
+  ASSERT_EQ(missing.missing_fields.size(), 1u);
+  EXPECT_NE(missing.missing_fields[0].find("max_flight_height_m"), std::string::npos);
+}
+
+TEST(Capabilities, ADroneWithAnUpwardSensorSeesAboveAndNeedsNoDeclaredHeight) {
+  // Turn the downward depth camera to face up.
+  std::string text = example_text("aerial_multirotor.yaml");
+  text = replace_once(text, "rpy_rad: [0.0, 1.5708, 0.0]", "rpy_rad: [0.0, -1.5708, 0.0]");
+  text = replace_once(text, "  max_flight_height_m: 2.5\n", "");
+  const Capabilities c = derive_capabilities(load_profile_text(text));
+  EXPECT_TRUE(c.sees_above);
+  EXPECT_TRUE(c.safety_ready);
+  EXPECT_TRUE(c.missing_fields.empty());
+}
+
+TEST(Capabilities, SparseRaysStopCoverageWhereAThinObstacleFitsBetweenThem) {
+  // The front lidar and depth camera with their rays 1 degree apart: a 5 cm pole fits
+  // between two of them beyond 0.05 / (2 tan 0.5 deg), about 2.9 m. Declaring 10 cm as the
+  // thinnest obstacle doubles that.
+  std::string text = example_text("planar_differential.yaml");
+  text = replace_once(text, "    fov_deg: {h: 270, v: 1.0}\n",
+                      "    fov_deg: {h: 270, v: 1.0}\n    angular_resolution_deg: 1.0\n");
+  text = replace_once(text, "    fov_deg: {h: 87, v: 58}\n",
+                      "    fov_deg: {h: 87, v: 58}\n    angular_resolution_deg: 1.0\n");
+  const auto reach_ahead = [](const Capabilities& c) {
+    for (const auto& b : c.sensing.bins) {
+      if (b.azimuth_deg == 0.0) return b.max_seen_m + b.edge_distance_m;
+    }
+    return 0.0;
+  };
+  const Capabilities fine = derive_capabilities(load_profile_text(example_text("planar_differential.yaml")));
+  const Capabilities sparse = derive_capabilities(load_profile_text(text));
+  const double thin = 0.05 / (2.0 * std::tan(0.5 * M_PI / 180.0));
+  EXPECT_GT(reach_ahead(fine), thin + 1.0);
+  EXPECT_LE(reach_ahead(sparse), thin + 0.4);  // ranges count from the sensor, a little ahead of the base
+  const Capabilities wider = derive_capabilities(load_profile_text(
+      replace_once(text, "assumptions:\n", "assumptions:\n  min_obstacle_width_m: 0.1\n")));
+  EXPECT_NEAR(reach_ahead(wider), 2.0 * thin, 0.3);
 }

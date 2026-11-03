@@ -12,11 +12,14 @@ import os
 import random
 import subprocess
 import threading
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import rclpy
 from geometry_msgs.msg import Twist
+from nav_msgs.msg import Odometry
+from rclpy.qos import qos_profile_sensor_data
 from rclpy.executors import SingleThreadedExecutor
 from rclpy.parameter import Parameter
 
@@ -30,6 +33,7 @@ from .world import bridge_entries, bridge_yaml, world_sdf
 
 # The bridge carries commands to Gazebo from here; the motor controller feeds it.
 DRIVE_TOPIC = "/argus_gazebo/drive"
+RECORD_PERIOD_S = 0.05  # state recorded for playback at 20 Hz
 
 
 def isolated_env() -> dict:
@@ -82,6 +86,27 @@ class MotorController:
             self.pub.publish(Twist())
             self.stopped = True
 
+    def take_off(self, height: float, wall_timeout_s: float = 60.0) -> bool:
+        """Climbs straight up until the truth says the base is at `height`, then hovers: what a
+        pilot or flight controller does before handing a drone over, so its odometry measures
+        height from where it booted on the floor. False if it did not get there in time."""
+        z = [None]
+        sub = self.node.create_subscription(Odometry, "/argus_truth", lambda m: z.__setitem__(0, m.pose.pose.position.z),
+                                            qos_profile_sensor_data)
+        up = Twist()
+        up.linear.z = 0.5
+        deadline = time.monotonic() + wall_timeout_s
+        reached = False
+        while time.monotonic() < deadline:
+            if z[0] is not None and z[0] >= height - 0.03:
+                reached = True
+                break
+            self.pub.publish(up)
+            time.sleep(0.05)
+        self.pub.publish(Twist())
+        self.node.destroy_subscription(sub)
+        return reached
+
     def close(self) -> None:
         self.executor.shutdown()
         self.thread.join(5.0)
@@ -95,8 +120,14 @@ class GazeboRobot:
     entries: list
     procs: list = field(default_factory=list)
     controller: MotorController | None = None
+    # What Argus added to a design's own model to run it (design_model.py), for the run log.
+    added: list = field(default_factory=list)
     # Set when the robot was started outside a run that already reaps its processes.
     reaping: object | None = None
+    # GZ_PARTITION, GZ_IP and GZ_SIM_RESOURCE_PATH: what a Gazebo window needs to attach.
+    env: dict = field(default_factory=dict)
+    # The design's sensors that sit away from their declared mounts (design_model.py).
+    mount_findings: list = field(default_factory=list)
 
     def alive(self) -> bool:
         return all(p.poll() is None for p in self.procs)
@@ -114,24 +145,54 @@ class GazeboRobot:
 
 
 def start_robot(doc: dict, world: World, start, work: Path, env: dict, gui: bool = False,
-                controller_timeout: bool = True, odom_scale: float = 1.0) -> GazeboRobot:
-    """Starts Gazebo, the bridge and the motor controller. Needs rclpy initialised."""
-    model, topics = model_sdf(doc, "robot", start, odom_scale=odom_scale)
+                controller_timeout: bool = True, odom_scale: float = 1.0, design_dir: Path | None = None,
+                record_path: Path | None = None) -> GazeboRobot:
+    """Starts Gazebo, the bridge and the motor controller. Needs rclpy initialised.
+
+    With `record_path`, Gazebo records the simulation's state there every RECORD_PERIOD_S for
+    playback (`gz sim --playback`). `robot.env` holds what a Gazebo window needs to attach to
+    this run later (its partition, address and resource path).
+
+    A drone whose start is above the floor is spawned landed below it and flown up there
+    first (MotorController.take_off), so its odometry starts on the floor as a real one's
+    does; Argo and setup measure heights from there."""
+    aerial = doc["motion"]["space"] == "aerial"
+    landed_z = -float(doc["geometry"].get("ground_z_m", 0.0))
+    take_off_to = None
+    if aerial and start[2] > landed_z + 0.05:
+        take_off_to = float(start[2])
+        start = (start[0], start[1], landed_z, start[3])
+    added: list = []
+    if design_dir is not None:
+        # The user's own model (hub plan H3), with only what a run needs added.
+        from .design_model import design_model, resource_env
+
+        dm = design_model(Path(design_dir), doc, "robot", start, env)
+        model, topics, added, mounts = dm.sdf, dm.topics, dm.added, dm.mount_findings
+        env = resource_env(env, dm)
+    else:
+        model, topics = model_sdf(doc, "robot", start, odom_scale=odom_scale)
     entries = bridge_entries(doc, topics, command_topic=DRIVE_TOPIC)
     (work / "world.sdf").write_text(world_sdf(world, [model]))
     (work / "bridge.yaml").write_text(bridge_yaml(entries))
-    robot = GazeboRobot(model=model, topics=topics, entries=entries)
+    robot = GazeboRobot(model=model, topics=topics, entries=entries, added=added,
+                        mount_findings=mounts if design_dir is not None else [])
     if procs._active is None:
         robot.reaping = procs.reaping(work)
         robot.reaping.__enter__()
-    robot.procs.append(start_process(["gz", "sim", "-s", "-r", "--headless-rendering", str(work / "world.sdf")],
-                                     work / "gz.log", env))
+    record = ["--record-path", str(record_path), "--record-period", str(RECORD_PERIOD_S)] if record_path else []
+    robot.env = {k: env[k] for k in ("GZ_PARTITION", "GZ_IP", "GZ_SIM_RESOURCE_PATH") if env.get(k)}
+    robot.procs.append(start_process(["gz", "sim", "-s", "-r", "--headless-rendering", *record,
+                                      str(work / "world.sdf")], work / "gz.log", env))
     if gui:
         robot.procs.append(start_process(["gz", "sim", "-g"], work / "gz_gui.log", env))
     robot.procs.append(start_process(["ros2", "run", "ros_gz_bridge", "parameter_bridge", "--ros-args",
                                       "-p", f"config_file:={work / 'bridge.yaml'}", "-p", "use_sim_time:=true"],
                                      work / "bridge.log", env))
     robot.controller = MotorController(doc, timeout=controller_timeout)
+    if take_off_to is not None and not robot.controller.take_off(take_off_to):
+        robot.stop()
+        raise RuntimeError(f"the drone did not climb to its start height {take_off_to:.2f} m")
     return robot
 
 

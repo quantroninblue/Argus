@@ -4,7 +4,9 @@
     robots.yaml      node_id: {profile, site} for every robot allowed to connect
     pki/             ca.pem, ca.key, hub.pem, hub.key (robots' certificates are issued here)
     designs/         robot designs, one directory per version (see designs.py)
+    sites/<site>/    site.yaml (floor_z_m, ceiling_z_m), places.yaml, routes.yaml (places.py)
     runs/            run logs
+    jobs/<id>/       validation jobs: job.json and each run's log (validation.py)
     run/app.sock     the app interface; run/ is readable only by the hub's owner
 
 `~/.local/share/argus` unless `--home` or ARGUS_HOME says otherwise.
@@ -53,8 +55,16 @@ class Home:
         return self.root / "designs"
 
     @property
+    def sites(self) -> Path:
+        return self.root / "sites"
+
+    @property
     def runs(self) -> Path:
         return self.root / "runs"
+
+    @property
+    def jobs(self) -> Path:
+        return self.root / "jobs"
 
     @property
     def run_dir(self) -> Path:
@@ -67,7 +77,7 @@ class Home:
     def init(self, hosts: list[str]) -> list[str]:
         """Creates whatever is missing; returns what was made. Existing keys are never replaced."""
         made = []
-        for d in (self.root, self.profiles, self.pki, self.designs, self.runs):
+        for d in (self.root, self.profiles, self.pki, self.designs, self.runs, self.jobs):
             if not d.is_dir():
                 d.mkdir(parents=True)
                 made.append(f"{d}/")
@@ -96,7 +106,7 @@ class Home:
             missing.append(f"{self.profiles}/")
         out = []
         if missing:
-            out.append(f"missing {', '.join(missing)}; run: python3 -m argus hub init --home {self.root}")
+            out.append(f"missing {', '.join(missing)}; run: argus hub init --home {self.root}")
         if len(str(self.socket)) > MAX_SOCKET_PATH:
             out.append(f"{self.socket} is too long for a Unix socket ({len(str(self.socket))} characters, "
                        f"{MAX_SOCKET_PATH} at most); choose a shorter --home")

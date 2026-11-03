@@ -61,7 +61,8 @@ std::vector<std::string> flag_names(uint32_t flags) {
       {kNoTarget, "no_target"},       {kDeadline, "deadline"},   {kLocalization, "localization"},
       {kNotSafetyReady, "not_safety_ready"}, {kClamped, "clamped"}, {kUncovered, "uncovered"},
       {kStaleSensor, "stale_sensor"}, {kCreep, "creep"},         {kSlowed, "slowed"},
-      {kBlocked, "blocked"},     {kShortSight, "short_sight"},
+      {kBlocked, "blocked"},     {kShortSight, "short_sight"}, {kYielding, "yielding"},
+      {kNearPeople, "near_people"}, {kCeiling, "ceiling"}, {kOdometrySuspect, "odometry_suspect"},
   };
   std::vector<std::string> out;
   for (const auto& [flag, name] : names) {
@@ -92,10 +93,56 @@ SafetySupervisor::SafetySupervisor(const capabilities::Capabilities& caps, const
                    caps.failsafe.creep_speed_mps > 0.0;
   creep_budget_ = std::min(config_.creep_distance_m, 2.0 * body_.body_radius_m());
   creep_left_ = creep_budget_;
+  derive_corridor_reach();
   lease_ = config_.command_lease_s;
   if (lease_ <= 0.0) {
     const double timeout = caps.control.controller_timeout_s > 0.0 ? caps.control.controller_timeout_s : 0.3;
     lease_ = std::max(timeout, 2.5 * planner_period_s);
+  }
+}
+
+void SafetySupervisor::derive_corridor_reach() {
+  const auto& bins = caps_.sensing.bins;
+  corridor_reach_.assign(bins.size(), 0.0);
+  const double near_gap = capabilities::DeriveOptions{}.max_near_gap_m;
+  for (size_t i = 0; i < bins.size(); ++i) {
+    const CoverageBin& bi = bins[i];
+    double reach = bi.full_height_reach_m;
+    if (reach <= 0.0) {
+      continue;
+    }
+    const double ai = bi.azimuth_deg * M_PI / 180.0;
+    const Vec2 d(std::cos(ai), std::sin(ai));
+    // Half the width of the strip swept moving along d.
+    double w = body_.radius_m();
+    if (body_.planar()) {
+      w = 0.0;
+      for (const Vec2& p : body_.footprint()) {
+        w = std::max(w, std::abs(d.x() * p.y() - d.y() * p.x()));
+      }
+    }
+    const double edge = bi.edge_distance_m;
+    for (size_t j = 0; j < bins.size(); ++j) {
+      const CoverageBin& bj = bins[j];
+      if (j == i || bj.elevation_deg != bi.elevation_deg) {
+        continue;
+      }
+      const double th = std::abs(wrap_angle((bj.azimuth_deg - bi.azimuth_deg) * M_PI / 180.0));
+      // Only bearings that cross the strip ahead of the body's edge.
+      if (th < 1e-6 || th >= M_PI / 2.0 || std::tan(th) * edge >= w) {
+        continue;
+      }
+      const double leaves = w / std::sin(th);  // range at which this bearing leaves the strip
+      const double seen = bj.edge_distance_m + std::max(0.0, bj.full_height_reach_m);
+      if (seen >= leaves) {
+        continue;
+      }
+      if (bj.full_height_reach_m <= 0.0 && leaves - bj.edge_distance_m <= near_gap) {
+        continue;  // a blind sliver next to the body's edge, as a covered bearing may have
+      }
+      reach = std::min(reach, std::max(0.0, seen * std::cos(th) - edge));
+    }
+    corridor_reach_[i] = reach;
   }
 }
 
@@ -136,21 +183,118 @@ double SafetySupervisor::sight_speed_limit(const Vec3& direction) const {
   }
   // Largest v with v * delay + v^2 / (2 * decel) <= reach.
   const double delay = frame_age + period_ + m.latency_s;
-  const double reach = bin->full_height_reach_m;
+  const double reach = corridor_reach_[static_cast<size_t>(bin - caps_.sensing.bins.data())];
   return decel * (-delay + std::sqrt(delay * delay + 2.0 * reach / decel));
 }
 
-bool SafetySupervisor::envelope_clear(const Twist& v, const SafetyInputs& in, bool occupied_only) const {
+bool SafetySupervisor::envelope_clear(const Twist& v, const SafetyInputs& in, bool occupied_only,
+                                      bool* blind_above) const {
   const Pose4& here = in.odom.pose;
   const double coast = period_ + caps_.motion.latency_s;
-  const auto path = motion_.stopping_path(here, v, coast, config_.envelope_spacing_m, body_.radius_m());
+  std::vector<double> times;
+  const auto path = motion_.stopping_path(here, v, coast, config_.envelope_spacing_m, body_.radius_m(), &times);
   for (size_t i = 1; i < path.size(); ++i) {
-    const Contact c = body_.contact(in.map, path[i], &here);
+    const Contact c = body_.contact(in.map, path[i], &here, blind_above);
     if (c == Contact::Occupied || (c == Contact::Unknown && !occupied_only)) {
       return false;
     }
   }
+  return movers_clear(path, times, in);
+}
+
+bool SafetySupervisor::movers_clear(const std::vector<Pose4>& path, const std::vector<double>& times,
+                                    const SafetyInputs& in) const {
+  // Passive motion safety (Fraichard 2007): the body must be at rest before anything moving
+  // can reach it. Each obstacle keeps its velocity (people are not assumed to brake); a
+  // command passes only if, at every point of its stopping path, at the time the body gets
+  // there, every obstacle is still out of reach. Staying at rest is always allowed, so
+  // someone walking into a stopped robot never blocks it from stopping.
+  if (!in.movers || in.movers->empty() || path.size() < 2) {
+    return true;
+  }
+  for (const TrackedObstacle& m : *in.movers) {
+    if (m.remembered) {
+      continue;  // in the map already
+    }
+    const double reach = body_.radius_m() + m.radius_m + config_.mover_margin_m;
+    if (!reaches_height(m, path[0].position.z(), config_.mover_margin_m) &&
+        !reaches_height(m, path.back().position.z(), config_.mover_margin_m)) {
+      continue;
+    }
+    const double now_gap = (path[0].position.head<2>() - m.position).norm();
+    if (now_gap >= reach) {
+      const bool walker = m.moving || m.has_moved;
+      for (size_t i = 0; i < path.size(); ++i) {
+        const Eigen::Vector2d at = m.position + m.velocity * times[i];
+        double widen = 0.0;
+        if (walker) {
+          const double spread = std::hypot(m.position_sigma_m, m.velocity_sigma_mps * times[i]);
+          widen = std::min(config_.mover_widen_max_m, config_.mover_sigmas * spread);
+        }
+        if ((path[i].position.head<2>() - at).norm() < reach + widen &&
+            reaches_height(m, path[i].position.z(), config_.mover_margin_m)) {
+          return false;
+        }
+      }
+      continue;
+    }
+    // Already within reach. Something walking stays a reason to be at rest until it has gone
+    // by (passive safety). Something standing (it stopped beside the robot) must not trap
+    // it: moving straight away stays possible; anything else is refused, no step closer to
+    // it and no turning, which sweeps a ground body's corners into it.
+    if (m.velocity.norm() > 1e-3) {
+      return false;
+    }
+    if (body_.planar() && std::abs(wrap_angle(path.back().yaw - path[0].yaw)) > 1e-3) {
+      return false;
+    }
+    for (size_t i = 1; i < path.size(); ++i) {
+      const Eigen::Vector2d at = m.position + m.velocity * times[i];
+      if ((path[i].position.head<2>() - m.position).norm() < now_gap - 1e-3 ||
+          (path[i].position.head<2>() - at).norm() < now_gap - 1e-3) {
+        return false;
+      }
+    }
+  }
   return true;
+}
+
+bool SafetySupervisor::reaches_height(const TrackedObstacle& m, double z, double margin) const {
+  if (body_.planar()) {
+    return true;  // shares the floor with whatever walks there
+  }
+  const double r = body_.radius_m();
+  return z + r + margin >= m.z_low_m && z - r - margin <= m.z_high_m;
+}
+
+double SafetySupervisor::people_speed_limit(const SafetyInputs& in) const {
+  double limit = std::numeric_limits<double>::infinity();
+  if (!in.movers || config_.people_far_m <= config_.people_near_m) {
+    return limit;
+  }
+  const Vec3& here = in.odom.pose.position;
+  const auto& mc = caps_.motion;
+  double top = 0.0;
+  for (const auto* a : {&mc.x, &mc.y, &mc.z}) {
+    top = std::max({top, std::abs(a->min_mps), std::abs(a->max_mps)});
+  }
+  for (const TrackedObstacle& m : *in.movers) {
+    if (!m.has_moved) {
+      continue;
+    }
+    double gap = (here.head<2>() - m.position).norm() - body_.radius_m() - m.radius_m;
+    if (!body_.planar()) {
+      // Over or under it, the vertical gap counts too.
+      const double r = body_.radius_m();
+      gap = std::max({gap, m.z_low_m - (here.z() + r), (here.z() - r) - m.z_high_m});
+    }
+    if (gap >= config_.people_far_m) {
+      continue;
+    }
+    const double f = std::clamp((gap - config_.people_near_m) / (config_.people_far_m - config_.people_near_m), 0.0, 1.0);
+    limit = std::min(limit, config_.people_speed_mps + f * std::max(0.0, top - config_.people_speed_mps));
+  }
+  return limit;
 }
 
 Twist SafetySupervisor::limit_acceleration(const Twist& v) const {
@@ -199,6 +343,29 @@ Twist SafetySupervisor::gate(const Twist& in_v, const SafetyInputs& in, uint32_t
         break;
     }
     v = motion_.clamp(v);
+    if (!body_.planar() && std::isfinite(config_.ceiling_z_m) && v.linear.z() > 0.0) {
+      // Fastest climb that still stops below the declared highest flight height.
+      const double room = config_.ceiling_z_m - in.odom.pose.position.z();
+      const double a = caps_.motion.z.decel_mps2;
+      const double coast = period_ + caps_.motion.latency_s;
+      double vz = 0.0;
+      if (room > 0.0) {
+        vz = a > 0.0 ? -a * coast + std::sqrt(a * a * coast * coast + 2.0 * a * room) : room / std::max(coast, 1e-3);
+      }
+      if (v.linear.z() > vz) {
+        flags |= kCeiling;
+        v.linear.z() = std::max(0.0, vz);
+      }
+    }
+    const double people = people_speed_limit(in);
+    if (v.linear.norm() > people) {
+      flags |= kNearPeople;
+      v.linear *= people / v.linear.norm();
+    }
+    if (in.odometry_suspect && v.linear.norm() > config_.odometry_suspect_speed_mps) {
+      flags |= kOdometrySuspect;
+      v.linear *= config_.odometry_suspect_speed_mps / v.linear.norm();
+    }
   }
 
   if (v.linear.norm() > kMoving) {
@@ -206,7 +373,19 @@ Twist SafetySupervisor::gate(const Twist& in_v, const SafetyInputs& in, uint32_t
       Twist scaled = v;
       scaled.linear *= scale;
       scaled = motion_.clamp(scaled);
-      if (envelope_clear(scaled, in, occupied_only)) {
+      bool blind_above = false;
+      if (envelope_clear(scaled, in, occupied_only, &blind_above)) {
+        if (blind_above && scaled.linear.z() > kMoving) {
+          // A climb into space above the body no sensor can see: short, slow stretches only,
+          // as for creeping where it cannot see (an upward sensor would show the space).
+          if (!creep_available()) {
+            continue;
+          }
+          flags |= kCreep;
+          if (scaled.linear.norm() > caps_.failsafe.creep_speed_mps) {
+            scaled.linear *= caps_.failsafe.creep_speed_mps / scaled.linear.norm();
+          }
+        }
         if (scale < 1.0) {
           flags |= kSlowed;
         }
@@ -223,6 +402,27 @@ Twist SafetySupervisor::gate(const Twist& in_v, const SafetyInputs& in, uint32_t
   if (v.yaw_rate != 0.0 && body_.planar() && !envelope_clear(v, in, occupied_only)) {
     flags |= kBlocked;
     v.yaw_rate = 0.0;
+  }
+  // A drone's arms sweep too. Its map checks treat it as a sphere, so yaw on the spot is held
+  // only when something that moves is about to reach it (passive safety: be at rest).
+  if (v.yaw_rate != 0.0 && !body_.planar() && v.linear.norm() <= kMoving && in.movers && !in.movers->empty()) {
+    std::vector<double> times;
+    const auto path = motion_.stopping_path(in.odom.pose, v, period_ + caps_.motion.latency_s,
+                                            config_.envelope_spacing_m, body_.radius_m(), &times);
+    for (const TrackedObstacle& m : *in.movers) {
+      if (m.remembered) {
+        continue;
+      }
+      const double reach = body_.radius_m() + m.radius_m + config_.mover_margin_m;
+      const double t_end = times.empty() ? 0.0 : times.back();
+      const Eigen::Vector2d at = m.position + m.velocity * t_end;
+      if ((in.odom.pose.position.head<2>() - at).norm() < reach &&
+          reaches_height(m, in.odom.pose.position.z(), config_.mover_margin_m)) {
+        flags |= kBlocked;
+        v.yaw_rate = 0.0;
+        break;
+      }
+    }
   }
   return v;
 }

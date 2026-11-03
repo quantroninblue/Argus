@@ -266,7 +266,7 @@ def check(version_dir: Path) -> tuple[dict | None, list[Finding]]:
     else:
         findings.append(Finding("error", ANSWERS_NAME, "missing; a URDF cannot say the robot's speed and braking "
                                                        "limits, command topic or failsafe "
-                                                       "(start one with: python3 -m argus setup template)"))
+                                                       "(start one with: argus setup template)"))
     doc = None
     try:
         doc, problems, notes = build_profile(urdf, answers, packages=packages)
@@ -278,6 +278,13 @@ def check(version_dir: Path) -> tuple[dict | None, list[Finding]]:
         if problems:
             doc = None
     findings += _gazebo_findings(version_dir)
+    if doc is not None and (version_dir / GAZEBO_NAME).exists():
+        from argus.gazebo.design_model import DesignModelError, mount_findings
+
+        try:
+            findings += [Finding("warning", "sensors", f) for f in mount_findings(version_dir, doc)]
+        except (DesignModelError, ET.ParseError):
+            pass  # the Gazebo model's own problems are reported above
     return doc, findings
 
 

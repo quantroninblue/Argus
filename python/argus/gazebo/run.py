@@ -116,30 +116,43 @@ class _Watcher:
         self.node.destroy_node()
 
 
-def _judge_movers(world: World, judge, pos, yaw, t, speed, at_rest, touching, out) -> None:
-    """The headless rule (argus.sim.episode.Simulation._judge_movers) on Gazebo's true poses."""
+def _judge_movers(world: World, judge, pos, yaw, t, velocity, yaw_rate, at_rest, touching, out) -> None:
+    """The headless rule (argus.sim.episode.Simulation._judge_movers) on Gazebo's true poses:
+    the robot is at fault when it moves toward a mover, or turns, while touching it."""
     for i, m in enumerate(world.movers):
-        if not judge.collides(World(boxes=m.box(t)[None, :], name=world.name), pos, yaw):
+        box = m.box(t)
+        if not judge.collides(World(boxes=box[None, :], name=world.name), pos, yaw):
             touching.pop(i, None)
             continue
+        centre = np.array([(box[0] + box[3]) / 2, (box[1] + box[4]) / 2])
+        toward = float(np.dot(velocity[:2], centre - pos[:2])) > 1e-4 or abs(yaw_rate) > 0.05
+        at_fault = not at_rest and toward
         before = touching.get(i)
-        if before is None or (not at_rest and before == "rest"):
-            out.contacts.append({"t": t, "with": m.name, "robot_speed_mps": speed, "at_rest": at_rest})
-        if not at_rest:
+        if before is None or (at_fault and before != "fault"):
+            out.contacts.append({"t": t, "with": m.name, "robot_speed_mps": float(np.linalg.norm(velocity)),
+                                 "at_rest": at_rest, "toward": toward})
+        if at_fault:
             out.collided = True
-        touching[i] = "rest" if at_rest else "moving"
+        touching[i] = "fault" if at_fault else "clear"
 
 
 def run_gazebo_episode(doc: dict, world: World, start, goal, duration_s: float, tolerance_m: float = 0.4,
                        gui: bool = False, workdir: str | None = None, log_store: RunLogStore | None = None,
-                       keep_log: bool = False, record_bag: bool = False) -> GazeboEpisode:
+                       keep_log: bool = False, record_bag: bool = False,
+                       design_dir: str | Path | None = None, record_state: bool = False,
+                       on_started=None) -> GazeboEpisode:
     """Sends the body from `start` (x, y, z, yaw) to `goal` through the hub, `duration_s` of
-    simulated time at most. With `gui`, Gazebo's window shows the run.
+    simulated time at most. With `gui`, Gazebo's window shows the run. With `design_dir` (a
+    stored design version), the user's own model runs (design_model.py) instead of the model
+    built from the profile; `doc` is then that design's profile.
 
     A run log (runlog.py) is written to `<workdir>/log`. With `log_store`, it moves into the
     store instead, where reading it deletes it unless `keep_log`; a work directory made here is
     then removed too, since it holds the run's keys. `record_bag` adds an mcap recording of
-    every bridged ROS 2 topic (large: depth images are about 1 MB/s).
+    every bridged ROS 2 topic (large: depth images are about 1 MB/s). `record_state` adds
+    Gazebo's own state recording in `replay/` for playback in its window (`gz sim --playback`).
+    `on_started(env)` is called once Gazebo runs, with what a Gazebo window needs to attach to
+    it (GZ_PARTITION, GZ_IP, GZ_SIM_RESOURCE_PATH).
 
     However the run ends (finished, Ctrl-C, SIGTERM, or this process killed), its processes
     are stopped and the private keys in the work directory are deleted; logs stay."""
@@ -147,11 +160,11 @@ def run_gazebo_episode(doc: dict, world: World, start, goal, duration_s: float, 
     work.mkdir(parents=True, exist_ok=True)
     with reaping(work):
         return _run(doc, world, start, goal, duration_s, tolerance_m, gui, work, workdir is None, log_store,
-                    keep_log, record_bag)
+                    keep_log, record_bag, design_dir, record_state, on_started)
 
 
 def _run(doc, world, start, goal, duration_s, tolerance_m, gui, work: Path, made_work: bool,
-         log_store, keep_log, record_bag) -> GazeboEpisode:
+         log_store, keep_log, record_bag, design_dir=None, record_state=False, on_started=None) -> GazeboEpisode:
     out = GazeboEpisode(workdir=str(work))
 
     (work / "profile.yaml").write_text(profiles.dump(doc))
@@ -183,7 +196,10 @@ def _run(doc, world, start, goal, duration_s, tolerance_m, gui, work: Path, made
     robot = None
     recorder = None
     try:
-        robot = start_robot(doc, world, start, work, env, gui=gui)
+        robot = start_robot(doc, world, start, work, env, gui=gui, design_dir=design_dir,
+                            record_path=work / "log" / "replay" if record_state else None)
+        if on_started is not None:
+            on_started(dict(robot.env))
         # What Argo publishes on the profile's command topic is recorded too.
         command = (doc["control"]["endpoint"], "", "geometry_msgs/msg/Twist", "", "")
         recorder = RosRecorder(robot.entries + [command], doc["control"]["endpoint"],
@@ -217,9 +233,10 @@ def _run(doc, world, start, goal, duration_s, tolerance_m, gui, work: Path, made
             out.trace.append(pose)
             if movers is not None and previous is not None and t > previous[0]:
                 dt = t - previous[0]
-                speed = float(np.linalg.norm(np.subtract(pose[1:4], previous[1:4]))) / dt
-                at_rest = speed < 0.01 and abs((yaw - previous[4] + np.pi) % (2 * np.pi) - np.pi) / dt < 0.01
-                _judge_movers(world, judge, np.array([x, y, z]), yaw, t, speed, at_rest, touching, out)
+                velocity = np.subtract(pose[1:4], previous[1:4]) / dt
+                yaw_rate = ((yaw - previous[4] + np.pi) % (2 * np.pi) - np.pi) / dt
+                at_rest = float(np.linalg.norm(velocity)) < 0.01 and abs(yaw_rate) < 0.01
+                _judge_movers(world, judge, np.array([x, y, z]), yaw, t, velocity, yaw_rate, at_rest, touching, out)
             if judge.collides(world, np.array([x, y, z]), yaw):
                 if not in_contact:
                     out.collisions.append({"t_s": t, "until_s": t, "pose": [x, y, yaw]})
@@ -252,7 +269,8 @@ def _run(doc, world, start, goal, duration_s, tolerance_m, gui, work: Path, made
             robot.stop()
             log_dir = write_run_log(work / "log", work, doc=doc, world=world, model=robot.model, topics=robot.topics,
                                     start=start, goal=goal, tolerance_m=tolerance_m, episode=out,
-                                    recorder=recorder)
+                                    recorder=recorder, added=robot.added,
+                                    mount_findings=robot.mount_findings)
         else:
             log_dir = work / "log"
             log_dir.mkdir(exist_ok=True)

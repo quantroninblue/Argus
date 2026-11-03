@@ -63,7 +63,14 @@ struct PathRequest {
   double comfort_clearance_m = 0.0;
   double unknown_penalty = 1.0;
   int max_expansions = 200000;
+  // When set (two points or more, and a width above zero), cells farther than `corridor_m`
+  // from this polyline are not entered: a path that stays near a route given from outside.
+  std::vector<Vec3> corridor;
+  double corridor_m = 0.0;
 };
+
+// Distance from `p` to the polyline `line` (in the plane when `planar`).
+double distance_to_polyline(const std::vector<Vec3>& line, const Vec3& p, bool planar);
 
 struct PathResult {
   std::vector<Vec3> points;

@@ -1,4 +1,4 @@
-"""Command line: python3 -m argus <command>.
+"""Command line: argus <command>.
 
   certs ca DIR                     a new certificate authority in DIR
   certs hub DIR --host H [...]     the hub's certificate, valid for each host name or address
@@ -22,6 +22,23 @@
                                    store a robot design on the hub and check it
   design list                      every design and its versions
   design show NAME[@VERSION]       a design's findings and capability report
+  place add SITE NAME X Y [Z] [--tolerance M] [--heading RAD] [--replace]
+  place here ROBOT NAME            a place where the robot is now, in its site
+  place list [SITE], place remove SITE NAME
+  route add SITE NAME PLACE[:DWELL_S] ... [--mode once|loop|back_and_forth] [--cycles N]
+          [--on-unreachable skip|stop] [--replace]
+  route list [SITE], route remove SITE NAME
+  go ROBOT PLACE                   send a robot to a named place in its site
+  patrol ROBOT ROUTE               run a robot along a route
+  worlds                           the worlds a validation job can use
+  validate NAME[@VERSION] [--worlds W,...] [--contents objects,movers,empty] [--repeats N]
+          [--view] [--detach]      drive a design through Gazebo worlds and diagnose each run
+  jobs list                        every validation job and how it went
+  jobs watch JOB [--view]          follow a job's runs; --view opens Gazebo on each live run
+  jobs report JOB                  each run's outcome and findings
+  jobs cancel|keep|unkeep|delete JOB
+  runs show JOB RUN                one run: outcome, findings, timeline, log files
+  runs replay JOB RUN              play a finished run back in Gazebo
 
 Every hub command takes --home DIR (default ~/.local/share/argus, or ARGUS_HOME).
 """
@@ -84,7 +101,7 @@ def _setup(args) -> int:
             result = live_check(doc, args.duration, args.motion, args.wheels_up, args.sim_time, args.direct)
         finally:
             rclpy.shutdown()
-        print(result.text())
+        print(_colour_results(result.text()))
         return 0 if result.ok else 1
     if args.step == "calibrate":
         import rclpy
@@ -136,7 +153,7 @@ def _setup(args) -> int:
         for p in problems:
             print(f"  {p}", file=sys.stderr)
         if any(p.endswith("required") or "required property" in p for p in problems):
-            print("Start an answers file with: python3 -m argus setup template > answers.yaml", file=sys.stderr)
+            print("Start an answers file with: argus setup template > answers.yaml", file=sys.stderr)
         return 1
     Path(args.out).write_text(profiles.dump(doc))
     print(f"wrote {args.out}\n")
@@ -181,7 +198,7 @@ def _design(hub, args) -> int:
     if args.action == "list":
         reply = hub.designs()
         if not reply.designs:
-            print("no designs yet; add one with: python3 -m argus design add URDF -a ANSWERS")
+            print("no designs yet; add one with: argus design add URDF -a ANSWERS")
         for d in reply.designs:
             for v in d.versions:
                 print(format_design(v))
@@ -200,6 +217,178 @@ def _design(hub, args) -> int:
     return 0
 
 
+def _csv_list(text: str | None) -> list[str]:
+    return [t.strip() for t in text.split(",") if t.strip()] if text else []
+
+
+def _follow(hub, job_id: str, view: bool) -> int:
+    from argus import branding
+    from argus.hub import viewer
+    from argus.hub.client import follow
+
+    if view:
+        problems = viewer.problems()
+        if problems:
+            print("cannot open Gazebo here: " + "; ".join(problems), file=sys.stderr)
+            return 1
+        print("Gazebo opens on each run as it starts; closing the window does not stop the run.")
+    try:
+        job = follow(hub, job_id, view)
+    except KeyboardInterrupt:
+        print(f"\nstopped following; the job carries on (argus jobs watch {job_id[:15]})")
+        return 0
+    if job is None:
+        return 1
+    r = job.report
+    reached = r.outcomes.get("reached", 0)
+    argus_runs = len(r.argus_runs)
+    print(f"job {job.id} {branding.word(job.status)}: {reached} of {r.runs} reached; "
+          + (branding.word("argus") + f" findings in {argus_runs}" if argus_runs else branding.word("ok") + ", no Argus findings"))
+    print(f"report: argus jobs report {job.id[:15]}")
+    return 0
+
+
+def _jobs(hub, args) -> int:
+    from argus.hub.client import format_job_line, format_report
+
+    if args.action == "list":
+        reply = hub.jobs()
+        if not reply.jobs:
+            print("no validation jobs yet; start one with: argus validate DESIGN")
+        for j in reply.jobs:
+            print(format_job_line(j))
+        return 0
+    if args.action in ("watch", "view"):
+        return _follow(hub, args.job, args.action == "view" or args.view)
+    if args.action == "report":
+        reply = hub.job(args.job)
+        if not reply.found:
+            print(reply.detail, file=sys.stderr)
+            return 1
+        print(format_report(reply.job))
+        return 0
+    if args.action == "cancel":
+        reply = hub.cancel_job(args.job)
+    elif args.action in ("keep", "unkeep"):
+        reply = hub.keep_job(args.job, args.action == "keep")
+    else:
+        reply = hub.delete_job(args.job)
+    print(reply.detail, file=sys.stdout if reply.ok else sys.stderr)
+    return 0 if reply.ok else 1
+
+
+def _runs(hub, args) -> int:
+    from argus import branding
+    from argus.hub import viewer
+    from argus.hub.client import find_run, run_line
+
+    reply = hub.job(args.job)
+    if not reply.found:
+        print(reply.detail, file=sys.stderr)
+        return 1
+    run = find_run(reply.job, args.run)
+    if run is None:
+        print(f"no run {args.run!r} in job {reply.job.id}; runs are numbered 1 to {len(reply.job.runs)}",
+              file=sys.stderr)
+        return 1
+    log_dir = Path(run.log_dir)
+    findings = [{"category": f.category, "sentence": f.sentence, "time_s": [f.from_s, f.to_s] if f.has_time else None}
+                for f in run.findings]
+    if args.action == "show":
+        print(run_line(run, len(reply.job.runs)))
+        if run.detail:
+            print(f"  {run.detail}")
+        for f in run.findings:
+            when = f" [{f.from_s:.1f}-{f.to_s:.1f} s]" if f.has_time else ""
+            print(f"  {f.category}{when}: {f.sentence}" + (f" ({', '.join(f.signals)})" if f.signals else ""))
+        print()
+        print(viewer.format_timeline(viewer.timeline(log_dir, findings)))
+        print()
+        print(f"log: {branding.link(str(log_dir)) if log_dir.is_dir() else str(log_dir) + ' (not written)'}")
+        if log_dir.is_dir():
+            print("  " + "  ".join(sorted(p.name for p in log_dir.iterdir())))
+        return 0
+    if run.status in ("queued", "running"):
+        print(f"run {run.index} is {run.status}; watch it live with: argus jobs view {reply.job.id[:15]}",
+              file=sys.stderr)
+        return 1
+    problems = viewer.problems()
+    if problems:
+        print("cannot open Gazebo here: " + "; ".join(problems), file=sys.stderr)
+        return 1
+    try:
+        window = viewer.replay(log_dir, run.resource_path)
+    except FileNotFoundError as e:
+        print(e, file=sys.stderr)
+        return 1
+    print(run_line(run, len(reply.job.runs)))
+    print("Gazebo plays the run back; use its play, pause and seek controls. Times below are simulated seconds.")
+    print(viewer.format_timeline(viewer.timeline(log_dir, findings)))
+    try:
+        window.wait()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        viewer.close(window)
+    return 0
+
+
+def _stops(items: list[str]) -> list[tuple[str, float]] | None:
+    out = []
+    for item in items:
+        name, sep, dwell = item.partition(":")
+        try:
+            out.append((name, float(dwell) if sep else 0.0))
+        except ValueError:
+            print(f"{item}: expected PLACE or PLACE:DWELL_SECONDS", file=sys.stderr)
+            return None
+    return out
+
+
+def _places(hub, args) -> int:
+    from argus import branding
+
+    if args.command == "go":
+        reply = hub.go(args.robot, args.place)
+    elif args.command == "patrol":
+        reply = hub.patrol(args.robot, args.route)
+    elif args.command == "place" and args.action == "list":
+        for site in hub.places(args.site or "").sites:
+            print(branding.heading(site))
+            for pl in site.places:
+                heading = f", heading {pl.heading_rad:.2f} rad" if pl.has_heading else ""
+                print(f"  {pl.name:<16} {pl.x:7.2f} {pl.y:7.2f} {pl.z:6.2f}  within {pl.tolerance_m:g} m{heading}")
+            if not site.places:
+                print("  no places")
+        return 0
+    elif args.command == "route" and args.action == "list":
+        for site in hub.routes(args.site or "").sites:
+            print(branding.heading(site))
+            for r in site.routes:
+                stops = ", ".join(f"{st.place}" + (f" ({st.dwell_s:g} s)" if st.dwell_s else "") for st in r.stops)
+                times = f" x{r.cycles}" if r.cycles else ""
+                print(f"  {r.name:<16} {r.mode}{times}: {stops}; unreachable: {r.on_unreachable}")
+            if not site.routes:
+                print("  no routes")
+        return 0
+    elif args.command == "place" and args.action == "add":
+        reply = hub.add_place(args.site, args.name, args.x, args.y, args.z, args.tolerance, args.heading, args.replace)
+    elif args.command == "place" and args.action == "here":
+        reply = hub.place_here(args.robot, args.name, args.tolerance, replace=args.replace)
+    elif args.command == "place":
+        reply = hub.remove_place(args.site, args.name)
+    elif args.action == "add":
+        stops = _stops(args.stops)
+        if stops is None:
+            return 2
+        reply = hub.add_route(args.site, args.name, stops, args.mode, args.on_unreachable, args.cycles or 0,
+                              args.replace)
+    else:
+        reply = hub.remove_route(args.site, args.name)
+    print(reply.detail, file=sys.stdout if reply.ok else sys.stderr)
+    return 0 if reply.ok else 1
+
+
 def _client(args) -> int:
     from argus.hub.client import AppClient, HubUnavailable, format_event, format_robots, format_status
     from argus.hub.home import Home
@@ -208,6 +397,30 @@ def _client(args) -> int:
         with AppClient(Home.at(args.home)) as hub:
             if args.command == "design":
                 return _design(hub, args)
+            if args.command == "jobs":
+                return _jobs(hub, args)
+            if args.command in ("place", "route", "go", "patrol"):
+                return _places(hub, args)
+            if args.command == "runs":
+                return _runs(hub, args)
+            if args.command == "worlds":
+                reply = hub.worlds()
+                for w in reply.worlds:
+                    print(f"{w.name:<14} {w.description}")
+                print(f"\ncontents: {', '.join(reply.contents)} (objects: as shipped; movers: with people "
+                      "walking through; empty: the bare room, one run whatever the worlds)")
+                return 0
+            if args.command == "validate":
+                name, _, version = args.design.partition("@")
+                reply = hub.validate(name, version, _csv_list(args.worlds), _csv_list(args.contents), args.repeats)
+                if not reply.ok:
+                    print(reply.detail, file=sys.stderr)
+                    return 1
+                print(reply.detail)
+                if args.detach:
+                    print(f"follow it with: argus jobs watch {reply.job.id[:15]} [--view]")
+                    return 0
+                return _follow(hub, reply.job.id, args.view)
             if args.command == "status":
                 print(format_status(hub.status()))
             elif args.command == "robots":
@@ -231,9 +444,35 @@ def _client(args) -> int:
     return 0
 
 
+class _Parser(argparse.ArgumentParser):
+    """The top-level help opens with the name; subcommands' help stays plain."""
+
+    def format_help(self) -> str:
+        from argus import branding
+
+        return branding.banner() + "\n\n" + super().format_help()
+
+
+def _colour_results(text: str) -> str:
+    """Colours the leading pass/FAIL word of each result line."""
+    from argus import branding
+
+    out = []
+    for line in text.splitlines():
+        word, sep, rest = line.partition("  ")
+        out.append(branding.status(word) + sep + rest if word in ("pass", "FAIL") else line)
+    return "\n".join(out)
+
+
 def main(argv: list[str] | None = None) -> int:
-    p = argparse.ArgumentParser(prog="python3 -m argus")
-    sub = p.add_subparsers(dest="command", required=True)
+    argv = sys.argv[1:] if argv is None else list(argv)
+    if "--no-color" in argv:
+        from argus import branding
+
+        branding.disable()
+        argv.remove("--no-color")
+    p = _Parser(prog="argus", epilog="--no-color anywhere turns colour off (so does NO_COLOR).")
+    sub = p.add_subparsers(dest="command", required=True, parser_class=argparse.ArgumentParser)
     c = sub.add_parser("certs", help="certificates for the hub and robots (mutual TLS)")
     kinds = c.add_subparsers(dest="kind", required=True)
     kinds.add_parser("ca", help="a new certificate authority").add_argument("dir")
@@ -303,14 +542,90 @@ def main(argv: list[str] | None = None) -> int:
     design_actions.add_parser("list", parents=[home], help="every design and its versions")
     show = design_actions.add_parser("show", parents=[home], help="a design's findings and capability report")
     show.add_argument("design", help="NAME or NAME@VERSION (a version prefix is enough)")
+    place = sub.add_parser("place", help="named places in a site")
+    place_actions = place.add_subparsers(dest="action", required=True)
+    a = place_actions.add_parser("add", parents=[home], help="a place by its coordinates in the site frame")
+    a.add_argument("site")
+    a.add_argument("name")
+    a.add_argument("x", type=float)
+    a.add_argument("y", type=float)
+    a.add_argument("z", type=float, nargs="?", default=0.0)
+    a.add_argument("--tolerance", type=float, default=0.0, help="metres (default 0.4)")
+    a.add_argument("--heading", type=float, help="radians, for places a robot must face a way at")
+    a.add_argument("--replace", action="store_true", help="replace a place of the same name")
+    a = place_actions.add_parser("here", parents=[home], help="a place where a robot is now")
+    a.add_argument("robot")
+    a.add_argument("name")
+    a.add_argument("--tolerance", type=float, default=0.0, help="metres (default 0.4)")
+    a.add_argument("--replace", action="store_true", help="replace a place of the same name")
+    a = place_actions.add_parser("list", parents=[home], help="every site's places")
+    a.add_argument("site", nargs="?")
+    a = place_actions.add_parser("remove", parents=[home], help="remove a place no route uses")
+    a.add_argument("site")
+    a.add_argument("name")
+    route = sub.add_parser("route", help="routes through a site's places")
+    route_actions = route.add_subparsers(dest="action", required=True)
+    a = route_actions.add_parser("add", parents=[home], help="a route: places in order, each with a dwell")
+    a.add_argument("site")
+    a.add_argument("name")
+    a.add_argument("stops", nargs="+", help="PLACE or PLACE:DWELL_SECONDS")
+    a.add_argument("--mode", default="once", choices=("once", "loop", "back_and_forth"))
+    a.add_argument("--cycles", type=int, help="times round for loop and back_and_forth (default: until cancelled)")
+    a.add_argument("--on-unreachable", default="skip", choices=("skip", "stop"),
+                   help="skip a stop that cannot be reached, or end the errand there")
+    a.add_argument("--replace", action="store_true", help="replace a route of the same name")
+    a = route_actions.add_parser("list", parents=[home], help="every site's routes")
+    a.add_argument("site", nargs="?")
+    a = route_actions.add_parser("remove", parents=[home], help="remove a route")
+    a.add_argument("site")
+    a.add_argument("name")
+    a = sub.add_parser("go", parents=[home], help="send a robot to a named place in its site")
+    a.add_argument("robot")
+    a.add_argument("place")
+    a = sub.add_parser("patrol", parents=[home], help="run a robot along a route in its site")
+    a.add_argument("robot")
+    a.add_argument("route")
+    sub.add_parser("worlds", parents=[home], help="the worlds a validation job can use")
+    val = sub.add_parser("validate", parents=[home], help="drive a design through Gazebo worlds and diagnose each run")
+    val.add_argument("design", help="NAME or NAME@VERSION (default: its latest version)")
+    val.add_argument("--worlds", help="comma separated (default: every world; see 'argus worlds')")
+    val.add_argument("--contents", help="comma separated: objects, movers, empty (default objects)")
+    val.add_argument("--repeats", type=int, default=1, help="runs per world and contents (default 1)")
+    val.add_argument("--view", action="store_true", help="open Gazebo on each run as it goes live")
+    val.add_argument("--detach", action="store_true", help="start the job and return")
+    jobs = sub.add_parser("jobs", help="validation jobs")
+    job_actions = jobs.add_subparsers(dest="action", required=True)
+    job_actions.add_parser("list", parents=[home], help="every job and how it went")
+    for name, text in (("watch", "follow a job's runs until it ends"), ("view", "watch, with Gazebo open on each run"),
+                       ("report", "each run's outcome and findings"), ("cancel", "stop a job"),
+                       ("keep", "never delete this job to make room"), ("unkeep", "let it be deleted to make room"),
+                       ("delete", "delete a finished job and its logs")):
+        a = job_actions.add_parser(name, parents=[home], help=text)
+        a.add_argument("job", help="the job's id, or the start of it")
+        if name == "watch":
+            a.add_argument("--view", action="store_true", help="open Gazebo on each run as it goes live")
+    runs = sub.add_parser("runs", help="runs of a validation job")
+    run_actions = runs.add_subparsers(dest="action", required=True)
+    for name, text in (("show", "outcome, findings, timeline and log files"),
+                       ("replay", "play a finished run back in Gazebo")):
+        a = run_actions.add_parser(name, parents=[home], help=text)
+        a.add_argument("job", help="the job's id, or the start of it")
+        a.add_argument("run", help="the run's number, or its name")
+    if not argv:
+        p.print_help()
+        return 0
     args = p.parse_args(argv)
     if args.command == "hub":
         from argus.hub import run
 
         if args.step == "init":
             return run.init(args.home, args.host)
+        from argus import branding
+
+        print(branding.banner() + "\n")
         return run.start(args.home, args.listen, args.intake)
-    if args.command in ("status", "robots", "goal", "cancel", "watch", "design"):
+    if args.command in ("status", "robots", "goal", "cancel", "watch", "design", "worlds", "validate", "jobs", "runs",
+                        "place", "route", "go", "patrol"):
         return _client(args)
     return _certs(args) if args.command == "certs" else _setup(args)
 

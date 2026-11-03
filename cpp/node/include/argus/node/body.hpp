@@ -31,7 +31,11 @@ class BodyVolume {
   // avoidance do (they work in the horizontal plane); the unknown share counts the rest:
   // cells beside or ahead of the body that no sensor covers, or closer than a sensor's
   // minimum range. A planar body is judged per column.
-  Contact contact(const LocalMap& map, const Pose4& pose, const Pose4* here) const;
+  //
+  // `blind_above`, when given, is set if an aerial body was let into cells above the top of
+  // its sphere at `here` that no sensor can see (above every vertical view): a climb into
+  // unseen space, which the supervisor limits like a creep.
+  Contact contact(const LocalMap& map, const Pose4& pose, const Pose4* here, bool* blind_above = nullptr) const;
 
   // Range sensors, for telling space above or below their view from space beside the body.
   struct Sensor {
@@ -43,6 +47,10 @@ class BodyVolume {
     sensors_ = std::move(sensors);
     map_cell_ = cell_m;
   }
+
+  // Some sensor covers the point's bearing, and none has it inside its field of view.
+  // `covered` and `in_view` accumulate, so a column can be judged cell by cell.
+  bool out_of_vertical_view(const Pose4& pose, const Vec3& point, bool& covered, bool& in_view) const;
 
   bool planar() const { return planar_; }
   // Height band, relative to the base origin, in which a planar body can hit something.
@@ -58,11 +66,9 @@ class BodyVolume {
  private:
   Cell column(const LocalMap& map, int ix, int iy, int z0, int z1) const;
   bool column_viewed(const LocalMap& map, int ix, int iy, int z0, int z1) const;
-  // Some sensor covers the point's bearing, and none has it inside its field of view.
-  bool out_of_vertical_view(const Pose4& pose, const Vec3& point, bool& covered, bool& in_view) const;
   bool column_out_of_vertical_view(const LocalMap& map, const Pose4& pose, int ix, int iy, int z0, int z1) const;
   Contact planar_contact(const LocalMap& map, const Pose4& pose, const Pose4* here) const;
-  Contact aerial_contact(const LocalMap& map, const Pose4& pose, const Pose4* here) const;
+  Contact aerial_contact(const LocalMap& map, const Pose4& pose, const Pose4* here, bool* blind_above) const;
 
   bool planar_ = true;
   double z_low_ = 0.0;

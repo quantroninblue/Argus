@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <limits>
 #include <map>
 #include <string>
 #include <vector>
@@ -9,6 +10,7 @@
 #include "argus/node/body.hpp"
 #include "argus/node/local_map.hpp"
 #include "argus/node/motion.hpp"
+#include "argus/node/tracker.hpp"
 
 namespace argus::node {
 
@@ -25,6 +27,15 @@ enum SafetyFlag : uint32_t {
   kSlowed = 1u << 8,
   kBlocked = 1u << 9,
   kShortSight = 1u << 10,
+  // Argo is holding still: something that was moving has stopped on its way (node.hpp).
+  kYielding = 1u << 11,
+  // Speed capped because something that moves is close (SafetyConfig::people_*).
+  kNearPeople = 1u << 12,
+  // Climb capped by the declared highest flight height.
+  kCeiling = 1u << 13,
+  // Odometry disagrees with what the range sensors show of the robot's own motion
+  // (Node: odometry cross-check); speed capped until they agree again.
+  kOdometrySuspect = 1u << 14,
 };
 
 std::vector<std::string> flag_names(uint32_t flags);
@@ -41,6 +52,26 @@ struct SafetyConfig {
   // Longest stretch a body may creep through directions it cannot see before it has to move
   // where it can again. Capped further at the body's own length.
   double creep_distance_m = 0.5;
+  // Clearance kept from a moving obstacle's predicted position, beyond both radii.
+  double mover_margin_m = 0.15;
+  // Widening of a moving thing's predicted spot by its tracker uncertainty, as PANTHER does
+  // (MIT ACL, `norminv_prob`): this many standard deviations of position spread at the time
+  // looked ahead to, at most mover_widen_max_m. Covers turns and speed changes the constant
+  // velocity prediction misses.
+  double mover_sigmas = 1.0;
+  double mover_widen_max_m = 0.3;
+  // Slower near things that move (people, carts), as Nav2's collision monitor slowdown zones
+  // and ISO 3691-4's reduced speed near people: within people_near_m of one (gap between
+  // body and it) at most people_speed_mps, rising linearly to the body's own limit at
+  // people_far_m. Only for tracks that have moved; others are plain obstacles.
+  double people_near_m = 0.5;
+  double people_far_m = 2.0;
+  double people_speed_mps = 0.3;
+  // Aerial bodies: the base never flies above this height in odom (set by Node from the
+  // profile's assumptions.max_flight_height_m); climbs are capped so they stop below it.
+  double ceiling_z_m = std::numeric_limits<double>::quiet_NaN();
+  // Top speed while odometry is suspect: the map and every stopping distance rest on it.
+  double odometry_suspect_speed_mps = 0.25;
 };
 
 // Time of the latest frame from each range sensor, and how old a frame may get.
@@ -56,6 +87,10 @@ struct SafetyInputs {
   const LocalMap& map;
   const SensorClock& sensors;
   double now;
+  // Things moving near the robot, predicted to `now` (tracker.hpp). Each is taken to keep its
+  // velocity: people are not assumed to brake for the robot.
+  const std::vector<TrackedObstacle>* movers = nullptr;
+  bool odometry_suspect = false;
 };
 
 enum class Coverage { Covered, Stale, Uncovered };
@@ -100,7 +135,13 @@ class SafetySupervisor {
   const Twist& last() const { return last_; }
 
  private:
-  bool envelope_clear(const Twist& v, const SafetyInputs& in, bool occupied_only) const;
+  bool envelope_clear(const Twist& v, const SafetyInputs& in, bool occupied_only, bool* blind_above = nullptr) const;
+  bool movers_clear(const std::vector<Pose4>& path, const std::vector<double>& times,
+                    const SafetyInputs& in) const;
+  // Highest speed allowed this close to things that have moved; infinity when none is near.
+  double people_speed_limit(const SafetyInputs& in) const;
+  // Whether a body at height z can reach the obstacle (always for planar bodies).
+  bool reaches_height(const TrackedObstacle& m, double z, double margin) const;
   Twist limit_acceleration(const Twist& v) const;
   void track_creep(const Vec3& position);
   Twist gate(const Twist& v, const SafetyInputs& in, uint32_t& flags) const;
@@ -112,6 +153,11 @@ class SafetySupervisor {
   double period_ = 0.02;
   double lease_ = 0.3;
   std::map<std::string, double> sensor_max_age_;
+  // Per coverage bin: how far ahead the whole strip the body sweeps moving that way is seen,
+  // measured from its edge. The bin's own full-height reach, shortened where a neighbouring
+  // bearing inside the strip sees less far (a wide body passes those bearings too).
+  std::vector<double> corridor_reach_;
+  void derive_corridor_reach();
   Twist last_;
   bool creep_allowed_ = false;
   double creep_budget_ = 0.0;

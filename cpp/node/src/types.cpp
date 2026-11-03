@@ -65,6 +65,8 @@ std::string to_string(EventKind kind) {
       return "failsafe_done";
     case EventKind::FailsafeCleared:
       return "failsafe_cleared";
+    case EventKind::Paused:
+      return "paused";
   }
   return "blocked";
 }

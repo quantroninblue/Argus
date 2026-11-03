@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 from argus import profile as profiles
+from argus.hub.diagnosis import diagnose
 from argus.hub.runlogs import RunLogStore
 from argus.sim import world as worlds
 
@@ -30,12 +31,7 @@ def _example(name):
 
 
 def _omnidirectional():
-    # The example has no odometry source, which a ROS 2 robot needs; a mecanum base reports
-    # wheel odometry.
-    doc = _example("planar_omnidirectional")
-    doc["sensors"].append({"id": "wheel_odom", "kind": "wheel_odom", "frame": "imu",
-                           "source": {"transport": "ros2", "endpoint": "/odom"}, "rate_hz": 50})
-    return doc
+    return _example("planar_omnidirectional")
 
 
 def _car_like():
@@ -57,6 +53,37 @@ def _quadcopter():
         if s["kind"] == "imu":
             s["source"] = {"transport": "ros2", "endpoint": "/imu"}
     return doc
+
+
+TB3 = Path("/opt/ros/jazzy/share/nav2_minimal_tb3_sim")
+
+
+@pytest.mark.skipif(not (TB3 / "urdf").exists(), reason="needs nav2_minimal_tb3_sim")
+@pytest.mark.parametrize("own_model", [True, False], ids=["its_gazebo_model", "urdf_only"])
+def test_a_stored_turtlebot3_design_reaches_the_goal_as_designed(own_model, tmp_path):
+    # The user's own robot runs, not a stand-in (hub plan H3): Nav2's TurtleBot3 Waffle with
+    # its own Gazebo model, and from its URDF alone, where Argus adds the drive and sensors.
+    from argus.hub.designs import DesignStore, collect
+
+    store = DesignStore(tmp_path / "designs")
+    v, _ = store.add(collect(TB3 / "urdf" / "turtlebot3_waffle.urdf",
+                             Path(__file__).parent / "designs" / "turtlebot3_waffle_answers.yaml",
+                             TB3 / "urdf" / "gz_waffle.sdf.xacro" if own_model else None))
+    ep = run_gazebo_episode(store.profile(v), worlds.wall_with_gap(), (0.0, 0.0, 0.0, 0.0), GOAL, 120.0,
+                            workdir=str(tmp_path / "run"), design_dir=v.path)
+    assert not ep.collided, ep.final_pose
+    run = json.loads((Path(ep.log_dir) / "run.json").read_text())
+    added = run["added_by_argus"]
+    assert any("true-pose" in a for a in added)
+    assert any("differential drive" in a for a in added) != own_model
+    findings = diagnose(ep.log_dir).findings
+    assert not [f for f in findings if f.category == "argus"], findings
+    if own_model:
+        # Nav2's Gazebo model puts the depth camera about 10 cm above where its URDF says (the
+        # sensor repeats its link's offset). That is the design's fault, and the run must say so.
+        assert any(f.rule == "sensor_mount" and "10 cm higher" in f.sentence for f in findings), findings
+    else:
+        assert ep.goal_reached, (ep.mission_state, ep.final_pose, ep.time_s)
 
 
 @pytest.mark.parametrize("make", [lambda: _example("planar_differential"), _omnidirectional, _car_like],
@@ -218,14 +245,9 @@ def test_quadcopter_flies_through_the_pillars_without_touching_one(tmp_path):
     assert ep.goal_reached, (ep.mission_state, ep.final_pose, ep.time_s)
 
 
-# 2026-11-01, before N2: the robot sees the person (the hub replans, Argo slows and blocks)
-# but steps aside from where they are, not where they are going, and is caught turning.
-@pytest.mark.xfail(strict=True, reason="Argo treats obstacles as still; hub plan item N2")
 def test_a_person_walking_toward_the_robot_is_seen_and_never_hit(tmp_path):
     from argus.sim.movers import Mover
 
-    # Headless, today's Argo gets out of the way at this speed (test_moving_obstacles.py); in
-    # Gazebo, with real drive dynamics, it does not.
     world = worlds.open_room().add_mover(Mover(path=[(6.5, 0.0), (-6.0, 0.0)], speed_mps=0.5,
                                                name="oncoming person"))
     ep = run_gazebo_episode(_example("planar_differential"), world, (0.0, 0.0, 0.0, 0.0), (6.0, 0.0, 0.0), 90.0,
@@ -234,3 +256,56 @@ def test_a_person_walking_toward_the_robot_is_seen_and_never_hit(tmp_path):
     assert ep.goal_reached, (ep.mission_state, ep.final_pose, ep.time_s)
     run = json.loads((Path(ep.log_dir) / "run.json").read_text())
     assert run["world"]["movers"][0]["name"] == "oncoming person"
+
+
+@pytest.mark.xfail(reason="planned for v1.1: in Gazebo the yaw run is refused once and the 0.5 m/s descent "
+                          "never settles", strict=False)
+def test_calibration_measures_a_drone_climbing_and_descending(tmp_path):
+    # The drone starts hovering 3.2 m up in a room with no roof; it declares 9 m as the highest
+    # it may fly, so both vertical runs have room at full speed.
+    drone = _quadcopter()
+    drone.setdefault("assumptions", {})["max_flight_height_m"] = 9.0
+    cal = _calibrate_in_gazebo(drone, drone, tmp_path / "drone", start=(0.0, 0.0, 3.2, 0.0))
+    assert cal.problems == [], cal.text()
+    names = " ".join(m.field for m in cal.measurements)
+    assert "motion.limits.z.velocity_mps (up)" in names and "motion.limits.z.velocity_mps (down)" in names, cal.text()
+    assert cal.profile["provenance"]["motion.limits.z.decel_mps2"] == "calibrated"
+
+
+@pytest.mark.skipif(not (TB3 / "urdf").exists(), reason="needs nav2_minimal_tb3_sim")
+def test_a_validation_job_runs_records_and_diagnoses_a_design(tmp_path):
+    # Hub plan H4: the hub runs the job in a child process with a hub of its own, a Gazebo
+    # window can attach while the run is live, and the run is recorded for playback.
+    import asyncio
+
+    from argus.hub.designs import DesignStore, collect
+    from argus.hub.validation import Validator
+
+    store = DesignStore(tmp_path / "designs")
+    # From its URDF alone: Nav2's own Gazebo model of it has a misplaced camera (see above).
+    design, _ = store.add(collect(TB3 / "urdf" / "turtlebot3_waffle.urdf",
+                                  Path(__file__).parent / "designs" / "turtlebot3_waffle_answers.yaml"))
+    v = Validator(tmp_path / "jobs", store)
+    job = v.start(design.name, "", ["wall_with_gap"], ["objects"], 1)
+    attached = []
+
+    async def go():
+        task = asyncio.ensure_future(v.run_one(job, job.runs[0]))
+        while not task.done():
+            live = v.live(v.jobs.get(job.id))
+            if live and not attached:
+                attached.append(live[1])
+            await asyncio.sleep(0.5)
+        await task
+
+    asyncio.run(go())
+    done = v.jobs.get(job.id)
+    run = done.runs[0]
+    assert done.status == "done" and run.status == "done", run.detail
+    assert run.outcome == "reached", run.findings
+    assert "argus" not in run.blames, run.findings
+    assert attached and attached[0]["GZ_PARTITION"].startswith("argus-")
+    log = v.jobs.run_dir(done, run)
+    assert list((log / "replay").glob("*.tlog")), sorted(p.name for p in (log / "replay").iterdir())
+    assert not v.jobs.live_file(done, run).exists()
+    assert not list(log.rglob("*.key"))

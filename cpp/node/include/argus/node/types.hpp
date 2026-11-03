@@ -37,6 +37,10 @@ struct Odometry {
   Pose4 pose;
   Twist twist;
   bool healthy = true;
+  // Attitude beyond yaw, for placing sensor returns only: a multirotor tilts some ten degrees
+  // to speed up or slow down and its sensors tilt with it. The rest of Argo works in yaw.
+  double roll = 0.0;
+  double pitch = 0.0;
 };
 
 // One frame from a range sensor: a rows x cols grid of ranges in metres, row-major, in the
@@ -84,6 +88,9 @@ enum class EventKind {
   // The failsafe's own motion has finished (leg done, home reached, at landing height).
   FailsafeDone,
   FailsafeCleared,
+  // Argo stopped for something that came to rest on its way and is waiting to see if it
+  // moves on; not a failure. The detail says where.
+  Paused,
 };
 
 struct Event {

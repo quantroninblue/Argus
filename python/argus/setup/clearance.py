@@ -162,6 +162,19 @@ def range_toward(doc: dict, messages: dict, bearing: float, cone_deg: float = 3.
     return best
 
 
+def base_points(doc: dict, messages: dict) -> dict:
+    """Each range sensor's returns in the base frame, through its declared mount."""
+    out = {}
+    for spec in doc["sensors"]:
+        msg = messages.get(spec["id"])
+        if msg is None or spec["kind"] not in _CONVERT:
+            continue
+        rot, origin = _mount(doc, spec["frame"])
+        hits, _ = _CONVERT[spec["kind"]](msg, spec)
+        out[spec["id"]] = hits @ rot.T + origin if len(hits) else np.zeros((0, 3))
+    return out
+
+
 def snapshot(probe, doc: dict, wait_s: float = 0.7) -> dict:
     """The latest message from each ROS 2 range sensor, by sensor id."""
     got: dict = {}

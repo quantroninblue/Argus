@@ -202,6 +202,7 @@ PathResult PathSearch::find(const SearchGrid& ws, const PathRequest& req) {
   size_t best = s;
   double best_h = heuristic(start);
   size_t goal_k = ws.linear(goal_i);
+  const bool bounded = req.corridor.size() >= 2 && req.corridor_m > 0.0;
   const int dz_max = ws.planar() ? 0 : 1;
   int expansions = 0;
 
@@ -245,6 +246,9 @@ PathResult PathSearch::find(const SearchGrid& ws, const PathRequest& req) {
           if (clear < req.min_clearance_m) {
             continue;
           }
+          if (bounded && distance_to_polyline(req.corridor, ws.center_of(nb), ws.planar()) > req.corridor_m) {
+            continue;
+          }
           const size_t nk = ws.linear(nb);
           if (seen_[nk] == generation_ && closed_[nk]) {
             continue;
@@ -282,6 +286,24 @@ PathResult PathSearch::find(const SearchGrid& ws, const PathRequest& req) {
     result.points.push_back(goal);
   }
   return result;
+}
+
+
+double distance_to_polyline(const std::vector<Vec3>& line, const Vec3& p, bool planar) {
+  double best = std::numeric_limits<double>::infinity();
+  for (size_t i = 0; i + 1 < line.size(); ++i) {
+    Vec3 a = line[i];
+    Vec3 b = line[i + 1];
+    Vec3 q = p;
+    if (planar) {
+      a.z() = b.z() = q.z() = 0.0;
+    }
+    const Vec3 ab = b - a;
+    const double len2 = ab.squaredNorm();
+    const double t = len2 > 1e-12 ? std::clamp((q - a).dot(ab) / len2, 0.0, 1.0) : 0.0;
+    best = std::min(best, (a + t * ab - q).norm());
+  }
+  return best;
 }
 
 }  // namespace argus::grid

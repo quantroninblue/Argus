@@ -41,7 +41,7 @@ control:
 
 failsafe:
   link_lost_after_s: 3.0
-  on_link_lost: finish_leg_then_stop
+  on_link_lost: stop
   uncovered_motion: forbid
 
 sensors:

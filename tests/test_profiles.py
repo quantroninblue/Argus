@@ -161,7 +161,7 @@ def test_bindings_match_formula():
     with pytest.raises(ValueError):
         caps.motion.stopping_distance_m("w", 1.0)
     assert caps.control["interface"] == "velocity"
-    assert caps.failsafe["on_link_lost"] == "finish_leg_then_stop"
+    assert caps.failsafe["on_link_lost"] == "stop"
     assert caps.compute.accelerator == "rk3588_npu"
     assert len(caps.collision.footprint) >= 4
 

@@ -78,6 +78,7 @@ class UrdfSensor:
     rate_hz: float | None = None
     range_m: tuple[float, float] | None = None
     fov_deg: tuple[float, float] | None = None
+    angular_resolution_deg: float | None = None  # horizontal angle between rays
     topic: str | None = None
     name: str = ""
 
@@ -193,6 +194,9 @@ def _gazebo_sensors(root: ET.Element) -> list[UrdfSensor]:
                         vspan = float(v.findtext("max_angle", "0")) - float(v.findtext("min_angle", "0"))
                         sensor.kind = "range_3d"
                     sensor.fov_deg = (min(360.0, math.degrees(span)), math.degrees(vspan) or 1.0)
+                    samples = int(float(h.findtext("samples", "0")))
+                    if samples > 1 and span > 0.0:
+                        sensor.angular_resolution_deg = math.degrees(span) / (samples - 1)
             if rng is not None:
                 sensor.range_m = (float(rng.findtext("min", "0.1")), float(rng.findtext("max", "10")))
             cam = s.find("camera")
@@ -202,6 +206,8 @@ def _gazebo_sensors(root: ET.Element) -> list[UrdfSensor]:
                 hgt = float(cam.findtext("image/height", "480"))
                 vfov = 2 * math.atan(math.tan(hfov / 2) * hgt / w)
                 sensor.fov_deg = (math.degrees(hfov), math.degrees(vfov))
+                if w > 0:
+                    sensor.angular_resolution_deg = math.degrees(hfov) / w
                 near, far = cam.findtext("clip/near"), cam.findtext("clip/far")
                 if near and far:
                     sensor.range_m = (float(near), float(far))

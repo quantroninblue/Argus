@@ -92,6 +92,9 @@ LocalPlanner::LocalPlanner(const capabilities::Capabilities& caps, const BodyVol
   if (ring.empty()) {
     return;
   }
+  for (const auto* b : ring) {
+    covered_ring_.push_back(b->full_height_reach_m > 0.0);
+  }
   auto covered_at = [&](double bearing) {
     const int n = static_cast<int>(ring.size());
     double deg = bearing * 180.0 / M_PI;
@@ -109,6 +112,66 @@ LocalPlanner::LocalPlanner(const capabilities::Capabilities& caps, const BodyVol
   active_bearing_ = travel_bearing_;
 }
 
+bool LocalPlanner::ring_covered(double bearing) const {
+  if (covered_ring_.empty()) {
+    return true;
+  }
+  const int n = static_cast<int>(covered_ring_.size());
+  double deg = wrap_angle(bearing) * 180.0 / M_PI;
+  if (deg < 0.0) deg += 360.0;
+  return covered_ring_[static_cast<int>(std::lround(deg / (360.0 / n))) % n];
+}
+
+double LocalPlanner::watch_yaw(const Pose4& pose, double heading) const {
+  const double path_yaw = heading - active_bearing_;
+  if (!movers_ || covered_ring_.empty()) {
+    return path_yaw;
+  }
+  // The nearest thing that moves, near enough to matter.
+  const TrackedObstacle* near = nullptr;
+  double best = config_.watch_movers_m;
+  for (const TrackedObstacle& o : *movers_) {
+    if (o.remembered || !(o.moving || o.has_moved)) continue;
+    const double d = (o.position - pose.position.head<2>()).norm();
+    if (d < best) {
+      best = d;
+      near = &o;
+    }
+  }
+  if (!near) {
+    return path_yaw;
+  }
+  const Vec2 rel = near->position - pose.position.head<2>();
+  const double toward = std::atan2(rel.y(), rel.x());
+  // The whole of it in view, not only its centre: half seen at the edge of a camera's view,
+  // its returns (and so its track) sit at that edge, and the centre alone would read as
+  // covered while the body walks out of view (PANTHER keeps the whole box in the view).
+  const int n = static_cast<int>(covered_ring_.size());
+  const double bin = 2.0 * M_PI / n;
+  const double half = std::atan2(near->radius_m, std::max(rel.norm(), 1e-3)) + bin;
+  auto in_view = [&](double yaw) {
+    for (double a = -half; a <= half + 1e-9; a += 0.5 * bin) {
+      if (!ring_covered(toward + a - yaw)) {
+        return false;
+      }
+    }
+    return true;
+  };
+  if (in_view(path_yaw)) {
+    return path_yaw;
+  }
+  // The smallest turn away from the path yaw that sees both the way ahead and the mover.
+  for (int k = 1; k <= 18; ++k) {
+    for (int sign : {1, -1}) {
+      const double yaw = path_yaw + sign * k * (M_PI / 18.0);
+      if (ring_covered(heading - yaw) && in_view(yaw)) {
+        return yaw;
+      }
+    }
+  }
+  return path_yaw;
+}
+
 double LocalPlanner::body_clearance(const Pose4& pose) const {
   if (!body_.planar()) {
     return ws_.clearance_at(pose.position) - body_.radius_m();
@@ -121,7 +184,7 @@ double LocalPlanner::body_clearance(const Pose4& pose) const {
 }
 
 void LocalPlanner::replan(const LocalMap& map, const Pose4& pose, const Vec3& goal, const Waypoint* following,
-                          double reverse_limit_m, double now) {
+                          double reverse_limit_m, double now, const std::vector<Vec3>* route) {
   ws_.build(map, body_, pose);
   PathRequest req;
   req.start = pose.position;
@@ -134,7 +197,25 @@ void LocalPlanner::replan(const LocalMap& map, const Pose4& pose, const Vec3& go
     req.min_clearance_m = body_.radius_m();
     req.comfort_clearance_m = body_.radius_m() + kComfortMargin;
   }
-  const PathResult result = search_.find(ws_, req);
+  off_route_ = false;
+  if (route != nullptr && route->size() >= 2 && config_.corridor_m > 0.0) {
+    req.corridor = *route;
+    req.corridor_m = std::max(config_.corridor_m, body_.radius_m() + ws_.resolution());
+  }
+  PathResult result = search_.find(ws_, req);
+  if (!req.corridor.empty() && !result.reached) {
+    // Nothing near the hub's legs. Only a search without the corridor tells a dead end (no way
+    // at all) from a way the hub did not choose; Argo does not take the latter itself.
+    PathRequest wide = req;
+    wide.corridor.clear();
+    const PathResult anywhere = search_.find(ws_, wide);
+    if (anywhere.reached) {
+      off_route_ = true;
+      result.exhausted = false;
+    } else {
+      result = anywhere;
+    }
+  }
   path_ = result.points;
   path_reverse_.assign(path_.size(), 0);
   hybrid_path_ = false;
@@ -248,15 +329,49 @@ Vec3 LocalPlanner::carrot(const Pose4& pose, const Vec3& goal, double speed) con
   }
   const double lookahead =
       hybrid_path_ ? std::clamp(kLookaheadTime * speed, kMinLookahead, kMaxLookahead) : lookahead_m_;
+  Vec3 aim = path_[end - 1];
+  size_t aim_index = end - 1;
   double travelled = 0.0;
   for (size_t i = nearest; i + 1 < end; ++i) {
     const double seg = (path_[i + 1] - path_[i]).norm();
     if (travelled + seg >= lookahead) {
-      return path_[i] + (path_[i + 1] - path_[i]) * ((lookahead - travelled) / seg);
+      aim = path_[i] + (path_[i + 1] - path_[i]) * ((lookahead - travelled) / seg);
+      aim_index = i;
+      break;
     }
     travelled += seg;
   }
-  return path_[end - 1];
+  if (std::isfinite(config_.ceiling_z_m)) {
+    aim.z() = std::min(aim.z(), config_.ceiling_z_m);
+  }
+  if (hybrid_path_) {
+    return aim;  // short and speed-scaled already; arcs are not straight lines anyway
+  }
+  // Where the path bends round something, a carrot that far along can sit behind it, and
+  // every rollout toward it is blocked while standing still scores best. Pull it back along
+  // the path until the body has a straight, clear line to it (line of sight, as the return
+  // trail's shortcut and Theta* use).
+  while (aim_index > nearest && !clear_line(pose, aim)) {
+    aim = path_[aim_index];
+    --aim_index;
+  }
+  return aim;
+}
+
+bool LocalPlanner::clear_line(const Pose4& pose, const Vec3& to) const {
+  Vec3 d = to - pose.position;
+  if (body_.planar()) {
+    d.z() = 0.0;
+  }
+  const double length = d.norm();
+  const double step = 0.5 * ws_.resolution();
+  const double floor_clear = std::min(0.0, body_clearance(pose));  // may start inside padding
+  for (double s = step; s < length; s += step) {
+    if (body_clearance(Pose4{pose.position + d * (s / length), pose.yaw}) < floor_clear) {
+      return false;
+    }
+  }
+  return true;
 }
 
 std::vector<Twist> LocalPlanner::candidates(const Odometry& odom, const Vec3& carrot, double cap) const {
@@ -319,9 +434,10 @@ std::vector<Twist> LocalPlanner::candidates(const Odometry& odom, const Vec3& ca
   const double heading_to = std::atan2(to.y(), to.x());
   // Turn so the body's best-covered side, not necessarily its nose, faces `heading`.
   auto yaw_rate_toward = [&](double heading) {
-    return std::clamp(2.0 * wrap_angle(heading - active_bearing_ - pose.yaw), -m.yaw_rate_max_radps,
+    return std::clamp(2.0 * wrap_angle(watch_yaw(pose, heading) - pose.yaw), -m.yaw_rate_max_radps,
                       m.yaw_rate_max_radps);
   };
+  const double path_yaw_rate = dist > 0.3 ? yaw_rate_toward(heading_to) : 0.0;
   for (double w : {yaw_rate_toward(heading_to), 0.0}) {
     Twist t;
     t.yaw_rate = w;
@@ -358,8 +474,10 @@ std::vector<Twist> LocalPlanner::candidates(const Odometry& odom, const Vec3& ca
     if (!std::isfinite(top) || top <= 0.0) {
       continue;
     }
-    const double horizontal = dir.head<2>().norm();
-    const double w = horizontal > 0.3 ? yaw_rate_toward(std::atan2(dir.y(), dir.x())) : 0.0;
+    // Yaw is its own step (RAPTOR, Zhou et al. 2021): one yaw command for every direction,
+    // turning the best-covered side along the way to the carrot, and each direction is
+    // flown at whatever speed the current heading lets the supervisor see for.
+    const double w = path_yaw_rate;
     // Fixed fractions of top speed, plus one that covers the remaining distance in about the
     // planning horizon, for the last metre or so.
     const double settle = dist / config_.horizon_s;
@@ -400,9 +518,15 @@ bool LocalPlanner::evaluate(const Twist& target, const Odometry& odom, const Vec
   const double wanted_yaw = std::atan2(from_start.y(), from_start.x()) - active_bearing_;
   auto heading_error = [&](const Pose4& p) { return std::abs(wrap_angle(wanted_yaw - p.yaw)); };
   double heading = heading_error(pose);
+  double people = 0.0;
   for (int i = 0; i < steps; ++i) {
     vel = motion_.accelerate(vel, target, dt);
     pose = MotionModel::integrate(pose, vel, dt);
+    if (std::isfinite(config_.ceiling_z_m) && pose.position.z() > config_.ceiling_z_m + 1e-6 &&
+        pose.position.z() > odom.pose.position.z()) {
+      return false;  // climbs above the declared highest flight height
+    }
+    people = std::max(people, people_cost(pose, (i + 1) * dt));
     const double clear = body_clearance(pose);
     if (clear < threshold &&
         (!contact_map || body_.contact(*contact_map, pose, &odom.pose) == Contact::Occupied)) {
@@ -427,6 +551,7 @@ bool LocalPlanner::evaluate(const Twist& target, const Odometry& odom, const Vec
   const double comfort = std::clamp(body_clearance(Pose4{carrot, odom.pose.yaw}), 0.0, kComfortMargin);
   cost += 0.5 * std::max(0.0, comfort - min_clear) / kComfortMargin;
   cost += 0.3 * unknown / static_cast<double>(steps);
+  cost += config_.people_cost * people;
   if (target.linear.x() < 0.0 && m.space == MotionSpace::Planar && active_bearing_ == 0.0) {
     cost += 0.3;
   }
@@ -438,8 +563,34 @@ bool LocalPlanner::evaluate(const Twist& target, const Odometry& odom, const Vec
   return true;
 }
 
+double LocalPlanner::people_cost(const Pose4& pose, double t) const {
+  if (!movers_ || config_.people_cost <= 0.0) {
+    return 0.0;
+  }
+  double worst = 0.0;
+  for (const TrackedObstacle& m : *movers_) {
+    if (!m.has_moved) {
+      continue;
+    }
+    const Eigen::Vector2d at = m.position + m.velocity * t;
+    const Eigen::Vector2d d = pose.position.head<2>() - at;
+    double gap = std::max(0.0, d.norm() - body_.radius_m() - m.radius_m);
+    if (!body_.planar()) {
+      const double r = body_.radius_m();
+      gap = std::max({gap, m.z_low_m - (pose.position.z() + r), (pose.position.z() - r) - m.z_high_m});
+    }
+    const double speed = m.velocity.norm();
+    const bool ahead = speed > 1e-3 && d.dot(m.velocity) > 0.0;
+    const double sigma = config_.people_sigma_m + (ahead ? speed * config_.people_ahead_s : 0.0);
+    worst = std::max(worst, std::exp(-gap * gap / (2.0 * sigma * sigma)));
+  }
+  return worst;
+}
+
 Proposal LocalPlanner::plan(const LocalMap& map, const Waypoint& target,
-                            const SafetySupervisor& supervisor, const SafetyInputs& in, const Waypoint* following) {
+                            const SafetySupervisor& supervisor, const SafetyInputs& in, const Waypoint* following,
+                            const std::vector<Vec3>* route) {
+  movers_ = in.movers;
   Proposal proposal;
   proposal.inputs_stamp = in.odom.stamp;
   proposal.has_target = true;
@@ -458,13 +609,14 @@ Proposal LocalPlanner::plan(const LocalMap& map, const Waypoint& target,
         reverse_limit = supervisor.creep_left_m();
       }
     }
-    replan(map, pose, target.position, following, reverse_limit, in.now);
+    replan(map, pose, target.position, following, reverse_limit, in.now, route);
     last_replan_ = in.now;
     last_goal_ = target.position;
   }
   proposal.path_reaches_target = path_reaches_;
   proposal.path_exhausted = path_exhausted_;
   proposal.target_blocked = target_blocked_;
+  proposal.off_route = off_route_;
 
   reversing_stretch_ = path_.size() >= 2 && path_reverse_[1] != 0;
   active_bearing_ = reversing_stretch_ ? M_PI : (hybrid_path_ ? 0.0 : travel_bearing_);
@@ -501,8 +653,57 @@ Proposal LocalPlanner::plan(const LocalMap& map, const Waypoint& target,
             [](const Rollout& a, const Rollout& b) { return a.cost < b.cost; });
   proposal.clear_rollouts = static_cast<int>(rollouts.size());
 
+  // On a kinematic path, speed is regulated rather than scored, as Nav2's Regulated Pure
+  // Pursuit does (Macenski et al. 2023): the pure pursuit arc to the carrot at the body's top
+  // speed, lowered for tight curvature, nearby obstacles and the approach to the goal. It is
+  // tried first; the sampled rollouts are the fallback.
+  if (hybrid_path_) {
+    const auto& m = caps_.motion;
+    const Vec3 local = Pose4{Vec3::Zero(), -pose.yaw}.rotate(aim - pose.position);
+    const double l2 = local.head<2>().squaredNorm();
+    if (l2 > 1e-4) {
+      const double k = std::clamp(2.0 * local.y() / l2, -1.0 / m.min_turn_radius_m, 1.0 / m.min_turn_radius_m);
+      const double top = reversing_stretch_ ? -m.x.min_mps : m.x.max_mps;
+      double v = top;
+      const double radius = std::abs(k) > 1e-9 ? 1.0 / std::abs(k) : 1e9;
+      const double slow_radius = 2.0 * m.min_turn_radius_m;
+      if (radius < slow_radius) {
+        v *= radius / slow_radius;
+      }
+      const double clear = body_clearance(pose);
+      if (clear < config_.regulate_clearance_m) {
+        v *= std::max(0.0, clear) / config_.regulate_clearance_m;
+      }
+      const double to_goal = (target.position - pose.position).head<2>().norm();
+      if (to_goal < config_.regulate_approach_m) {
+        v *= to_goal / config_.regulate_approach_m;
+      }
+      v = std::clamp(v, config_.regulate_min_speed_mps, top);
+      if (target.speed_cap_mps > 0.0) {
+        v = std::min(v, target.speed_cap_mps);
+      }
+      Twist t;
+      t.linear = Vec3(reversing_stretch_ ? -v : v, 0.0, 0.0);
+      t.yaw_rate = t.linear.x() * k;
+      t = motion_.clamp(t);
+      Rollout r;
+      if (evaluate(t, in.odom, aim, threshold, near ? &map : nullptr, r)) {
+        uint32_t flags = 0;
+        const Twist out = supervisor.preview(r.velocity, in, flags);
+        ++proposal.admission_checks;
+        if ((flags & (kBlocked | kStaleSensor)) == 0 && out.linear.norm() > 1e-6) {
+          proposal.velocity = out;
+          return proposal;
+        }
+      }
+    }
+  }
+
+  // Bodies with many candidates (an omnidirectional base has hundreds) get a bigger preview
+  // budget, so the first admissible one is not cut off; a quarter of the clear ones at most.
+  const int budget = std::max(config_.max_admission_checks, static_cast<int>(rollouts.size() / 4));
   for (const Rollout& r : rollouts) {
-    if (proposal.admission_checks++ >= config_.max_admission_checks) {
+    if (proposal.admission_checks++ >= budget) {
       break;
     }
     // Take the candidate as the supervisor would pass it. A slowed version still follows the

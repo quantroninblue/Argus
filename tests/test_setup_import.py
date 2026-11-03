@@ -86,6 +86,7 @@ def test_shapes_frames_and_sensors_come_from_the_urdf(urdf):
     (scan,) = body.sensors
     assert (scan.kind, scan.rate_hz, scan.topic, scan.range_m) == ("range_2d", 12.0, "scan", (0.1, 8.0))
     assert scan.fov_deg[0] == pytest.approx(180.0, abs=0.01)
+    assert scan.angular_resolution_deg == pytest.approx(180.0 / 359, abs=1e-3)  # 360 rays over 180 deg
 
 
 def test_import_with_answers_gives_a_valid_profile_with_provenance(urdf):
@@ -156,3 +157,21 @@ def test_turtlebot3_waffle_imports():
     lo = profiles.derive(doc).collision.aabb_min
     assert doc["geometry"]["ground_z_m"] == pytest.approx(-0.010, abs=1e-3)
     assert math.isclose(lo[2], -0.010, abs_tol=0.01)
+
+
+@pytest.mark.skipif(not TB3.is_file(), reason="TurtleBot3 description not installed")
+def test_a_camera_on_an_optical_frame_looks_forward():
+    # The Waffle's camera_depth_frame is rotated the ROS optical way (z forward, y down), as
+    # depth images are stamped. Read as x forward it pointed at the floor to the robot's right,
+    # and in Gazebo Argo saw phantom obstacles everywhere.
+    answers = yaml.safe_load((Path(__file__).parent / "designs" / "turtlebot3_waffle_answers.yaml").read_text())
+    doc, problems, notes = build_profile(TB3, answers)
+    assert problems == []
+    depth = next(s for s in doc["sensors"] if s["kind"] == "depth")
+    pose = doc["geometry"]["frames"][depth["frame"]]
+    assert depth["frame"] == "camera_depth_frame_x_forward"
+    assert all(abs(a) < 0.01 for a in pose["rpy_rad"]), pose
+    assert pose["xyz_m"] == doc["geometry"]["frames"]["camera_depth_frame"]["xyz_m"]
+    assert any("optical frame" in n for n in notes)
+    # Frames already looking along x are left alone.
+    assert next(s for s in doc["sensors"] if s["kind"] == "range_2d")["frame"] == "base_scan"

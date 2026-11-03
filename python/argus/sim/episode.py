@@ -32,10 +32,26 @@ class SimOptions:
     odometry_fails_at_s: float | None = None
     # Single range sensors that stop publishing, by id, from the given time on.
     sensor_fails_at_s: dict[str, float] = field(default_factory=dict)
+    # Faulty sensors that keep publishing, by id, from the given time on: a frozen driver
+    # resends its last frame with new stamps; a blinded one sends every ray invalid.
+    sensor_freezes_at_s: dict[str, float] = field(default_factory=dict)
+    sensor_blinded_at_s: dict[str, float] = field(default_factory=dict)
     seed: int = 0
     # Bodies with a minimum turn radius turn this much wider than commanded and than the
     # profile allows, the way real steering does (Gazebo's front-steered model: about 1.15).
     turn_radius_scale: float = 1.0
+    # A profile more optimistic than the body: the plant brakes at this share of the declared
+    # deceleration and takes this much longer than declared to act on a command. Safety
+    # margins must hold anyway (collisions); arriving may take longer.
+    brake_scale: float = 1.0
+    extra_latency_s: float = 0.0
+    # Range frames reach Argo this long after they were captured (stamped at capture).
+    sensor_latency_s: float = 0.0
+    # Odometry that drifts: distance reported times this scale, and a yaw rate error, from
+    # `odom_drift_from_s` on (from the start when None).
+    odom_scale: float = 1.0
+    odom_yaw_drift_radps: float = 0.0
+    odom_drift_from_s: float | None = None
     # Keep one row per control tick in Episode.trace.
     trace: bool = False
 
@@ -57,9 +73,10 @@ class Episode:
     max_speed_mps: float = 0.0
     # How many ticks each safety flag was raised.
     flag_counts: dict[str, int] = field(default_factory=dict)
-    # Each time a moving obstacle came into contact: {"t", "with", "robot_speed_mps", "at_rest"}.
-    # Contact while the robot moves sets `collided`; a mover walking into a robot already at
-    # rest does not (passive motion safety, Fraichard 2007).
+    # Each time a moving obstacle came into contact: {"t", "with", "robot_speed_mps", "at_rest",
+    # "toward"}. The robot driving (or turning) into it sets `collided`; a mover walking into a
+    # robot at rest, or the robot pulling away from it, does not (passive motion safety,
+    # Fraichard 2007).
     contacts: list[dict[str, Any]] = field(default_factory=list)
     trace: list[dict[str, Any]] = field(default_factory=list)
 
@@ -89,11 +106,13 @@ class Plant:
     flight-controller-like tracker that follows the setpoint moving at its feed-forward velocity.
     """
 
-    def __init__(self, caps, start, lead_s: float, turn_radius_scale: float = 1.0):
+    def __init__(self, caps, start, lead_s: float, turn_radius_scale: float = 1.0,
+                 brake_scale: float = 1.0, extra_latency_s: float = 0.0):
         self.m = caps.motion
         self.interface = caps.control["interface"]
         self.timeout = caps.control["controller_timeout_s"]
-        self.latency = self.m.latency_s
+        self.latency = self.m.latency_s + extra_latency_s
+        self.brake_scale = brake_scale
         self.lead = lead_s
         self.turn_scale = turn_radius_scale
         self.pos = np.array(start[:3], dtype=float)
@@ -135,8 +154,8 @@ class Plant:
                         np.clip(lin[2], m.z.min_mps, m.z.max_mps)])
         w = float(np.clip(w, -m.yaw_rate_max_radps, m.yaw_rate_max_radps))
         axes = (m.x, m.y, m.z)
-        self.vel = np.array([_approach(self.vel[i], lin[i], axes[i].accel_mps2, axes[i].decel_mps2, dt)
-                             for i in range(3)])
+        self.vel = np.array([_approach(self.vel[i], lin[i], axes[i].accel_mps2,
+                                       axes[i].decel_mps2 * self.brake_scale, dt) for i in range(3)])
         self.w_drive = _approach(self.w_drive, w, m.yaw_accel_radps2, m.yaw_accel_radps2, dt)
         self.w = self.w_drive
         if m.space == "planar":
@@ -155,6 +174,7 @@ class Plant:
 class _Sensor:
     def __init__(self, spec: dict, node, rng: np.random.Generator):
         self.id = spec["id"]
+        self.sees_glass = spec["kind"] not in ("range_2d", "range_3d")
         self.period = 1.0 / spec["rate_hz"]
         self.min_range, self.max_range = spec["range_m"]
         mount = np.asarray(node.sensor_mount(self.id))
@@ -167,7 +187,7 @@ class _Sensor:
     def frame(self, world: World, pos: np.ndarray, yaw: float, noise: float) -> np.ndarray:
         r = _rot(yaw)
         origin = pos + r @ self.mount_t
-        ranges = world.raycast(origin, self.dirs @ r.T, self.max_range)
+        ranges = world.raycast(origin, self.dirs @ r.T, self.max_range, self.sees_glass)
         ranges = np.minimum(ranges, self.self_hits)
         if noise > 0.0:
             finite = np.isfinite(ranges)
@@ -247,17 +267,21 @@ class _Judge:
         if self.m.space == "aerial":
             if pos[2] + self.z_range[0] < 0.0:
                 return True
-            for box in world.boxes:
+            for box in world.solid():
                 nearest = np.clip(pos, box[:3], box[3:])
                 if np.linalg.norm(nearest - pos) < self.radius:
                     return True
             return False
         poly = self.footprint @ _rot(yaw)[:2, :2].T + pos[:2]
         lo_z, hi_z = pos[2] + self.z_range[0], pos[2] + self.z_range[1]
-        for box in world.boxes:
+        for box in world.solid():
             if box[5] <= lo_z + 1e-3 or box[2] >= hi_z:
                 continue
             if _polygon_meets_rect(poly, box[0:2], box[3:5]):
+                return True
+        # Any part of the footprint over a pit: it has gone over the edge.
+        for hole in world.holes:
+            if _polygon_meets_rect(poly, hole[0:2], hole[2:4]):
                 return True
         return False
 
@@ -290,7 +314,12 @@ class Simulation:
         self.caps = profiles.derive(doc)
         self.node = argo.Node(profiles.dump(doc), config or argo.NodeConfig())
         self.plant = Plant(self.caps, start, self.node.control_period_s + self.caps.motion.latency_s,
-                           self.options.turn_radius_scale)
+                           self.options.turn_radius_scale, self.options.brake_scale,
+                           self.options.extra_latency_s)
+        # What odometry reports; equal to the truth unless the options make it drift.
+        self._est_pos = np.array(start[:3], dtype=float)
+        self._est_yaw = float(start[3])
+        self._frames: deque = deque()  # (deliver at, captured at, sensor id, ranges)
         self.judge = _Judge(self.caps, doc, self.node.control_period_s)
         rng = np.random.default_rng(self.options.seed)
         specs = {s["id"]: s for s in doc["sensors"]}
@@ -303,24 +332,32 @@ class Simulation:
         self._next_odom = 0.0
         self._next_tick = 0.0
         self._odom_yaw = self.plant.yaw
-        self._touch: dict[int, str] = {}  # mover index -> rest or moving, while in contact
+        self._touch: dict[int, str] = {}  # mover index -> fault or clear, while in contact
+        self._last_ranges: dict[str, np.ndarray] = {}
 
-    def _judge_movers(self, t: float) -> None:
-        """A contact is recorded when it starts, and again if the robot starts moving while
-        still touching; any step of contact with the robot moving is a collision."""
+    def _judge_movers(self, t: float, velocity: np.ndarray | None = None) -> None:
+        """A contact is recorded when it starts, and again if the robot starts driving into the
+        mover while still touching. The robot is at fault when it moves toward the mover (or
+        turns, sweeping its corners) during contact; pulling away from someone pressed against
+        it, or standing still while they walk into it, is not."""
         plant, result = self.plant, self.result
+        v = plant_velocity(plant) if velocity is None else velocity
         for i, m in enumerate(self.world.movers):
-            alone = type(self.world)(boxes=m.box(t)[None, :], name=self.world.name)
+            box = m.box(t)
+            alone = type(self.world)(boxes=box[None, :], name=self.world.name)
             if not self.judge.collides(alone, plant.pos, plant.yaw):
                 self._touch.pop(i, None)
                 continue
-            moving = not self.at_rest
+            centre = np.array([(box[0] + box[3]) / 2, (box[1] + box[4]) / 2])
+            toward = float(np.dot(v[:2], centre - plant.pos[:2])) > 1e-4 or abs(plant.w) > 0.05
+            at_fault = not self.at_rest and toward
             before = self._touch.get(i)
-            if before is None or (moving and before == "rest"):
-                result.contacts.append({"t": t, "with": m.name, "robot_speed_mps": self.speed, "at_rest": not moving})
-            if moving:
+            if before is None or (at_fault and before != "fault"):
+                result.contacts.append({"t": t, "with": m.name, "robot_speed_mps": self.speed,
+                                        "at_rest": self.at_rest, "toward": toward})
+            if at_fault:
                 result.collided = True
-            self._touch[i] = "moving" if moving else "rest"
+            self._touch[i] = "fault" if at_fault else "clear"
 
     @property
     def t(self) -> float:
@@ -341,9 +378,19 @@ class Simulation:
     def step(self, tick) -> dict | None:
         """Advances one time step. Returns the tick result if a control tick was due."""
         t, o, node, plant, result = self.t, self.options, self.node, self.plant, self.result
+        drifting = (o.odom_scale != 1.0 or o.odom_yaw_drift_radps != 0.0) and (
+            o.odom_drift_from_s is None or t >= o.odom_drift_from_s)
+        if not drifting:
+            # Until the drift starts, odometry is the truth.
+            self._est_pos = plant.pos.copy()
+            self._est_yaw = float(plant.yaw)
         if t >= self._next_odom - EPS:
             healthy = o.odometry_fails_at_s is None or t < o.odometry_fails_at_s
-            node.on_odometry(t, plant.pos.tolist(), plant.yaw, plant.vel.tolist(), plant.w, healthy)
+            if drifting:
+                node.on_odometry(t, self._est_pos.tolist(), self._est_yaw, (plant.vel * o.odom_scale).tolist(),
+                                 plant.w + o.odom_yaw_drift_radps, healthy)
+            else:
+                node.on_odometry(t, plant.pos.tolist(), plant.yaw, plant.vel.tolist(), plant.w, healthy)
             # Setpoint velocities are in odom; judge them in the base frame Argo last knew.
             self._odom_yaw = plant.yaw
             self._next_odom += 1.0 / o.odom_rate_hz
@@ -352,7 +399,18 @@ class Simulation:
                 s.next += s.period
                 failed = s.id in o.sensor_fails_at_s and t >= o.sensor_fails_at_s[s.id]
                 if not failed and (o.sensors_stop_at_s is None or t < o.sensors_stop_at_s):
-                    node.on_range_frame(t, s.id, s.frame(self.world.at(t), plant.pos, plant.yaw, o.range_noise_m))
+                    frozen = s.id in o.sensor_freezes_at_s and t >= o.sensor_freezes_at_s[s.id]
+                    if frozen and s.id in self._last_ranges:
+                        ranges = self._last_ranges[s.id]
+                    else:
+                        ranges = s.frame(self.world.at(t), plant.pos, plant.yaw, o.range_noise_m)
+                    if s.id in o.sensor_blinded_at_s and t >= o.sensor_blinded_at_s[s.id]:
+                        ranges = np.full_like(ranges, np.nan)
+                    self._last_ranges[s.id] = ranges
+                    self._frames.append((t + o.sensor_latency_s, t, s.id, ranges))
+        while self._frames and self._frames[0][0] <= t + EPS:
+            _, captured, sid, ranges = self._frames.popleft()
+            node.on_range_frame(captured, sid, ranges)
         out = None
         if t >= self._next_tick - EPS:
             out = tick(t)
@@ -369,11 +427,17 @@ class Simulation:
             if o.trace:
                 result.trace.append({"t": t, "pose": self.pose, "flags": out["flags"],
                                      "proposed": out["proposed"], "planner": out["planner"],
-                                     "path": len(node.path())})
+                                     "path": len(node.path()), "movers": node.movers()})
             plant.send(t, out["command"])
 
         before = plant.pos.copy()
+        before_yaw = plant.yaw
         plant.step(t, self.dt)
+        if drifting:
+            # Dead reckoning with a scale error and a yaw rate error, from the true motion.
+            moved = _rot(-before_yaw) @ (plant.pos - before)
+            self._est_yaw = _wrap(self._est_yaw + _wrap(plant.yaw - before_yaw) + o.odom_yaw_drift_radps * self.dt)
+            self._est_pos = self._est_pos + _rot(self._est_yaw) @ (moved * o.odom_scale)
         result.distance_m += float(np.linalg.norm(plant.pos - before))
         result.max_speed_mps = max(result.max_speed_mps, self.speed)
         if self.judge.collides(self.world, plant.pos, plant.yaw):
@@ -386,6 +450,13 @@ class Simulation:
         result.final_pose = self.pose
         self.k += 1
         return out
+
+
+def plant_velocity(plant) -> np.ndarray:
+    """The plant's velocity in the world frame (its state is in the body frame)."""
+    c, sn = math.cos(plant.yaw), math.sin(plant.yaw)
+    vx, vy = plant.vel[0], plant.vel[1]
+    return np.array([c * vx - sn * vy, sn * vx + c * vy, plant.vel[2]])
 
 
 def run_episode(doc: dict, world: World, start, waypoints: list[dict], duration_s: float,

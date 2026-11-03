@@ -67,6 +67,11 @@ sensors:
     frame: imu
     source: {transport: ros2, endpoint: /imu}
     rate_hz: 200
+  - id: wheel_odom
+    kind: wheel_odom
+    frame: imu
+    source: {transport: ros2, endpoint: /odom}
+    rate_hz: 50
 
 compute:
   board: vicharak_axon

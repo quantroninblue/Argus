@@ -1,4 +1,4 @@
-"""`python3 -m argus hub init|start`: set up a hub's home and run the hub.
+"""`argus hub init|start`: set up a hub's home and run the hub.
 
 The hub serves robots on HubLink (mutual TLS, `--listen`) and the argus command on its app
 socket (see app.py). It runs until Ctrl-C or SIGTERM. Robots connect with certificates signed
@@ -15,9 +15,11 @@ from .app import AppServer, HubAlreadyRunning
 from .gateway import Hub
 from .home import Home
 from .intake import IntakeConfig, parse_rate
+from .places import site_heights
 from .registry import Registry
 from .server import HubServer, TlsFiles
 from .session import HubConfig
+from .site import SiteService
 
 DEFAULT_HOSTS = ["localhost", "127.0.0.1"]
 
@@ -29,7 +31,10 @@ async def serve(home: Home, listen: str, intake_bytes_per_s: float | None = None
     config = HubConfig()
     if intake_bytes_per_s is not None:
         config.intake = IntakeConfig(bytes_per_s=intake_bytes_per_s)
-    hub = Hub(registry, config=config)
+    sites = SiteService()
+    for site, (floor, ceiling) in site_heights(home.sites).items():
+        sites.set_heights(site, floor, ceiling)
+    hub = Hub(registry, sites=sites, config=config, sites_dir=home.sites)
     robots = HubServer(hub, address=listen,
                        tls=TlsFiles(home.pki / "ca.pem", home.pki / "hub.pem", home.pki / "hub.key"))
     port = await robots.start()

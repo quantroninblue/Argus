@@ -1,5 +1,7 @@
 #include "argus/argo_ros/ros_driver.hpp"
 
+#include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <stdexcept>
 
@@ -150,6 +152,9 @@ void RosDriver::start(argo::Inbox& inbox) {
         const auto& q = m->pose.pose.orientation;
         o.pose.position = node::Vec3(p.x, p.y, p.z);
         o.pose.yaw = yaw_of(q.x, q.y, q.z, q.w);
+        // Roll and pitch too: a multirotor tilts to speed up, and its sensors with it.
+        o.roll = std::atan2(2.0 * (q.w * q.x + q.y * q.z), 1.0 - 2.0 * (q.x * q.x + q.y * q.y));
+        o.pitch = std::asin(std::clamp(2.0 * (q.w * q.y - q.z * q.x), -1.0, 1.0));
         // nav_msgs/Odometry carries the twist in the child (base) frame, as Argo does.
         const auto& t = m->twist.twist;
         o.twist.linear = node::Vec3(t.linear.x, t.linear.y, t.linear.z);

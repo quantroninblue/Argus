@@ -11,11 +11,13 @@
 namespace argus::capabilities {
 
 inline constexpr int kProfileFormatVersion = 1;
+inline constexpr double kDefaultMinObstacleWidthM = 0.05;
 
 enum class MotionSpace { Planar, Aerial };
 enum class ControlInterface { Velocity, PoseSetpoint, Waypoint };
 enum class Transport { Ros2, Mavlink, Serial, Custom };
-enum class LinkLostAction { Stop, Hold, FinishLegThenStop, ReturnHome, Land };
+// What Argo does when the hub is unreachable: it only stops and parks (decisions, 2026-11-03).
+enum class LinkLostAction { Stop, Hold, Land };
 enum class UncoveredMotion { Forbid, Creep };
 enum class SensorKind { Range2d, Range3d, Depth, Rgb, Imu, WheelOdom, Odometry, Contact };
 enum class Accelerator { None, Rk3588Npu, Hailo, Cuda };
@@ -80,6 +82,14 @@ struct SensorSpec {
   std::optional<Interval> range_m;
   std::optional<double> fov_h_deg;
   std::optional<double> fov_v_deg;
+  // Horizontal angle between neighbouring rays, if declared. Something thinner than the gap
+  // between two rays can sit unseen between them, so coverage stops where that gap grows
+  // wider than the thinnest obstacle (Profile::assumed_min_obstacle_width_m).
+  std::optional<double> angular_resolution_deg;
+  // What a ray with no return within range says: the space along it is free (the default),
+  // or nothing (unknown), for sensors that also get no return from dark, shiny or
+  // see-through surfaces. Unset means Argo's default (NodeConfig::no_return_is_free).
+  std::optional<bool> no_return_is_free;
 };
 
 struct ComputeSpec {
@@ -103,6 +113,10 @@ struct Profile {
   // sensor is one scan plane drive normally; unset, nothing is assumed.
   std::optional<double> assumed_min_obstacle_height_m;
   std::optional<double> assumed_clear_at_start_m;
+  std::optional<double> assumed_max_flight_height_m;
+  // Thinnest obstacle where the robot works (a table leg, a pole); kDefaultMinObstacleWidthM
+  // when not declared. Only matters for sensors that declare their angular resolution.
+  std::optional<double> assumed_min_obstacle_width_m;
   std::map<std::string, Provenance> provenance;
 
   const SensorSpec* sensor(const std::string& id) const;

@@ -11,6 +11,10 @@ def world_sdf(world: World, models: list[str], step_s: float = 0.001) -> str:
     """A world with DART physics at `step_s`, a frictional floor, the boxes as static walls and
     `models` (SDF strings) placed in it. Real-time factor 1, so a run takes as long as it would
     on a real robot."""
+    if len(world.holes):
+        raise ValueError("pits in the floor are simulated headless only; the Gazebo floor is solid")
+    if len(world.glass):
+        raise ValueError("glass is simulated headless only; Gazebo's lidars see every box")
     boxes = []
     for i, b in enumerate(world.boxes):
         lo, hi = b[:3], b[3:]

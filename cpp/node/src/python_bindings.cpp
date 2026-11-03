@@ -56,6 +56,8 @@ py::dict tick_dict(const TickResult& r) {
   planner["path_reaches_target"] = r.proposal.path_reaches_target;
   planner["candidates"] = r.proposal.candidates;
   planner["clear_rollouts"] = r.proposal.clear_rollouts;
+  planner["off_route"] = r.proposal.off_route;
+  planner["target_blocked"] = r.proposal.target_blocked;
   planner["admission_checks"] = r.proposal.admission_checks;
   d["planner"] = planner;
   py::list events;
@@ -106,14 +108,25 @@ PYBIND11_MODULE(node, m) {
       .def_readwrite("horizon_s", &PlannerConfig::horizon_s)
       .def_readwrite("rollout_step_s", &PlannerConfig::rollout_step_s)
       .def_readwrite("unknown_penalty", &PlannerConfig::unknown_penalty)
-      .def_readwrite("max_admission_checks", &PlannerConfig::max_admission_checks);
+      .def_readwrite("max_admission_checks", &PlannerConfig::max_admission_checks)
+      .def_readwrite("people_cost", &PlannerConfig::people_cost)
+      .def_readwrite("watch_movers_m", &PlannerConfig::watch_movers_m)
+      .def_readwrite("corridor_m", &PlannerConfig::corridor_m)
+      .def_readwrite("people_sigma_m", &PlannerConfig::people_sigma_m)
+      .def_readwrite("people_ahead_s", &PlannerConfig::people_ahead_s);
 
   py::class_<SafetyConfig>(m, "SafetyConfig")
       .def(py::init<>())
       .def_readwrite("command_lease_s", &SafetyConfig::command_lease_s)
       .def_readwrite("odometry_max_age_s", &SafetyConfig::odometry_max_age_s)
       .def_readwrite("max_unknown_fraction", &SafetyConfig::max_unknown_fraction)
-      .def_readwrite("envelope_spacing_m", &SafetyConfig::envelope_spacing_m);
+      .def_readwrite("envelope_spacing_m", &SafetyConfig::envelope_spacing_m)
+      .def_readwrite("mover_margin_m", &SafetyConfig::mover_margin_m)
+      .def_readwrite("mover_sigmas", &SafetyConfig::mover_sigmas)
+      .def_readwrite("mover_widen_max_m", &SafetyConfig::mover_widen_max_m)
+      .def_readwrite("people_near_m", &SafetyConfig::people_near_m)
+      .def_readwrite("people_far_m", &SafetyConfig::people_far_m)
+      .def_readwrite("people_speed_mps", &SafetyConfig::people_speed_mps);
 
   py::class_<NodeConfig>(m, "NodeConfig")
       .def(py::init<>())
@@ -122,8 +135,14 @@ PYBIND11_MODULE(node, m) {
       .def_readwrite("planner", &NodeConfig::planner)
       .def_readwrite("safety", &NodeConfig::safety)
       .def_readwrite("min_obstacle_height_m", &NodeConfig::min_obstacle_height_m)
+      .def_readwrite("drop_depth_m", &NodeConfig::drop_depth_m)
+      .def_readwrite("track_movers", &NodeConfig::track_movers)
+      .def_readwrite("check_odometry", &NodeConfig::check_odometry)
+      .def_readwrite("yield_wait_s", &NodeConfig::yield_wait_s)
+      .def_readwrite("static_after_s", &NodeConfig::static_after_s)
       .def_readwrite("no_return_is_free", &NodeConfig::no_return_is_free)
       .def_readwrite("no_progress_s", &NodeConfig::no_progress_s)
+      .def_readwrite("stuck_report_s", &NodeConfig::stuck_report_s)
       .def_readwrite("dead_end_s", &NodeConfig::dead_end_s);
 
   py::class_<LinkConfig>(m, "LinkConfig")
@@ -153,7 +172,7 @@ PYBIND11_MODULE(node, m) {
       .def(
           "on_odometry",
           [](Node& n, double stamp, const py::sequence& position, double yaw, const py::sequence& linear,
-             double yaw_rate, bool healthy) {
+             double yaw_rate, bool healthy, double roll, double pitch) {
             Odometry o;
             o.stamp = stamp;
             o.pose.position = vec3(position);
@@ -161,10 +180,12 @@ PYBIND11_MODULE(node, m) {
             o.twist.linear = vec3(linear);
             o.twist.yaw_rate = yaw_rate;
             o.healthy = healthy;
+            o.roll = roll;
+            o.pitch = pitch;
             n.on_odometry(o);
           },
           py::arg("stamp"), py::arg("position"), py::arg("yaw"), py::arg("linear"), py::arg("yaw_rate"),
-          py::arg("healthy") = true)
+          py::arg("healthy") = true, py::arg("roll") = 0.0, py::arg("pitch") = 0.0)
       .def(
           "on_range_frame",
           [](Node& n, double stamp, const std::string& sensor_id,
@@ -221,7 +242,30 @@ PYBIND11_MODULE(node, m) {
       .def(
           "cell", [](const Node& n, const py::sequence& p) { return cell_name(n.map().at(vec3(p))); },
           py::arg("position"))
+      .def(
+          "ever_free", [](const Node& n, const py::sequence& p) { return n.map().ever_free(n.map().index_of(vec3(p))); },
+          py::arg("position"))
       .def("path", &Node::path)
+      .def("movers",
+           [](const Node& n) {
+             py::list out;
+             for (const TrackedObstacle& o : n.movers()) {
+               py::dict d;
+               d["id"] = o.id;
+               d["position"] = py::make_tuple(o.position.x(), o.position.y());
+               d["velocity"] = py::make_tuple(o.velocity.x(), o.velocity.y());
+               d["radius_m"] = o.radius_m;
+               d["z_span"] = py::make_tuple(o.z_low_m, o.z_high_m);
+               d["moving"] = o.moving;
+               d["has_moved"] = o.has_moved;
+               d["remembered"] = o.remembered;
+               d["position_sigma_m"] = o.position_sigma_m;
+               d["velocity_sigma_mps"] = o.velocity_sigma_mps;
+               d["confirmed"] = o.confirmed;
+               out.append(d);
+             }
+             return out;
+           })
       .def_property_readonly("control_period_s", &Node::control_period_s)
       .def_property_readonly("command_lease_s", &Node::command_lease_s)
       .def_property_readonly("profile_id", [](const Node& n) { return n.profile().id; })
@@ -239,8 +283,6 @@ PYBIND11_MODULE(node, m) {
             static const std::map<std::string, LinkLostAction> actions = {
                 {"stop", LinkLostAction::Stop},
                 {"hold", LinkLostAction::Hold},
-                {"finish_leg_then_stop", LinkLostAction::FinishLegThenStop},
-                {"return_home", LinkLostAction::ReturnHome},
                 {"land", LinkLostAction::Land}};
             const auto it = actions.find(action);
             if (it == actions.end()) throw py::value_error("unknown failsafe action '" + action + "'");
@@ -250,7 +292,21 @@ PYBIND11_MODULE(node, m) {
       .def("clear_failsafe", &Node::clear_failsafe, py::arg("now"))
       .def("return_home", &Node::return_home, py::arg("now"))
       .def("set_paused", &Node::set_paused, py::arg("paused"), py::arg("now"))
-      .def("breadcrumbs", [](const Node& n) { return n.breadcrumbs(); });
+      .def("breadcrumbs", [](const Node& n) { return n.breadcrumbs(); })
+      .def("sensor_faults", [](const Node& n) { return n.sensor_faults(); })
+      .def("odometry_check", [](const Node& n) {
+        const auto& c = n.odometry_check();
+        py::dict d;
+        d["suspect"] = c.suspect;
+        d["shift_m"] = c.shift_m;
+        d["turn_rad"] = c.turn_rad;
+        d["verdicts"] = c.verdicts;
+        d["checks"] = c.checks;
+        d["last_zero"] = c.last_zero;
+        d["last_best"] = c.last_best;
+        d["last_points"] = c.last_points;
+        return d;
+      });
 
   py::class_<GrpcLinkConfig>(m, "GrpcLinkConfig")
       .def(py::init<>())

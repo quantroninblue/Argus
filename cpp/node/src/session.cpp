@@ -387,6 +387,10 @@ pb::Event Session::node_event(const Event& e) const {
     case EventKind::FailsafeCleared:
       out.set_kind(pb::EVENT_KIND_FAILSAFE_CLEARED);
       break;
+    case EventKind::Paused:
+      out.set_kind(pb::EVENT_KIND_SAFETY_STOP);
+      out.set_cause(pb::FAILURE_CAUSE_TEMPORARY_OBSTRUCTION);
+      break;
     case EventKind::PlanAccepted:
     case EventKind::PlanComplete:
       out.set_kind(pb::EVENT_KIND_UNSPECIFIED);

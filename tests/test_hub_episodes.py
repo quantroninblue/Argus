@@ -2,7 +2,6 @@
 route. Arrival, collisions and rule breaks are judged from simulator truth."""
 
 import copy
-import math
 
 import numpy as np
 import pytest
@@ -58,11 +57,10 @@ def test_examples_reach_a_goal_through_the_hub(name):
 STALL = (3.0, 16.0)
 
 
-# finish_leg_then_stop gets a short timeout so the leg it finishes is not the last one.
+# With the hub unreachable Argo only stops and parks (decisions, 2026-11-03).
 @pytest.mark.parametrize("name,action,lost_after", [
-    ("planar_differential", "finish_leg_then_stop", 1.0),
+    ("planar_differential", "stop", 1.0),
     ("planar_omnidirectional", "stop", None),
-    ("planar_omnidirectional", "return_home", None),
     ("aerial_multirotor", "hold", None),
     ("aerial_multirotor", "land", None),
 ])
@@ -87,8 +85,6 @@ def test_link_loss_ends_in_the_profiles_failsafe_and_the_mission_resumes(name, a
     assert np.linalg.norm(b - a) < 0.05, "the body stays where the failsafe left it"
 
     pose = _pose_at(ep, done["stamp"])
-    if action == "return_home":
-        assert math.hypot(pose[0], pose[1]) < 0.5
     if action == "land":
         assert pose[2] < 1.0
     if action in ("stop", "hold"):

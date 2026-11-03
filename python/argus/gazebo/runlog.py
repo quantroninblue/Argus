@@ -132,13 +132,14 @@ def _argo_counts(log: Path) -> dict:
             if len(parts) >= 3 and parts[1] == "event":
                 events[parts[2]] = events.get(parts[2], 0) + 1
             elif len(parts) >= 3 and parts[1] == "flags":
-                for f in parts[2].split(","):
+                for f in parts[2:]:
                     flags[f] = flags.get(f, 0) + 1
     return {"events": events, "flag_changes": flags}
 
 
 def write_run_log(log_dir: Path, work: Path, *, doc: dict, world, model: str, topics, start, goal,
-                  tolerance_m: float, episode, recorder: RosRecorder | None) -> Path:
+                  tolerance_m: float, episode, recorder: RosRecorder | None, added: list | None = None,
+                  mount_findings: list | None = None) -> Path:
     log_dir.mkdir(parents=True, exist_ok=True)
     (log_dir / "model.sdf").write_text(model)
     for name in ("world.sdf", "bridge.yaml", "profile.yaml", "argo.log", "gz.log", "bridge.log"):
@@ -163,6 +164,10 @@ def write_run_log(log_dir: Path, work: Path, *, doc: dict, world, model: str, to
 
     run = {
         "body": {"id": doc.get("id"), "name": doc.get("name"), "drivetrain": topics.drive},
+        # What Argus added to the user's model to run it; empty for the stand-in model.
+        "added_by_argus": list(added or []),
+        # The design's own sensors that are not where its profile says (design_model.py).
+        "mount_findings": list(mount_findings or []),
         "world": {"name": world.name, "boxes": [[round(float(v), 4) for v in b] for b in world.boxes],
                   "movers": [{"name": m.name, "path": [list(pt) for pt in m.path], "speed_mps": m.speed_mps,
                               "size_m": list(m.size), "start_s": m.start_s, "back_and_forth": m.back_and_forth}

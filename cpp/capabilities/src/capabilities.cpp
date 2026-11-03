@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <set>
+#include <limits>
 
 namespace argus::capabilities {
 
@@ -83,13 +84,16 @@ struct RangeSensor {
   Vec3 forward;
   double half_h = 0.0;
   double half_v = 0.0;
+  // Farthest range at which neighbouring rays are still closer together than the thinnest
+  // obstacle; beyond it something thin can sit between them.
+  double thin_range = std::numeric_limits<double>::infinity();
   bool full_circle = false;
   std::vector<const Shape*> occluders;
 
   bool sees(const Vec3& point) const {
     const Vec3 q = to_sensor * point;
     const double range = q.norm();
-    if (range < spec->range_m->min || range > spec->range_m->max) {
+    if (range < spec->range_m->min || range > spec->range_m->max || range > thin_range) {
       return false;
     }
     if (!full_circle && std::abs(std::atan2(q.y(), q.x())) > half_h + 1e-9) {
@@ -125,6 +129,10 @@ std::vector<RangeSensor> range_sensors(const Profile& profile) {
     s.half_h = 0.5 * *spec.fov_h_deg * kDeg;
     s.half_v = 0.5 * *spec.fov_v_deg * kDeg;
     s.full_circle = *spec.fov_h_deg >= 360.0;
+    if (spec.angular_resolution_deg) {
+      const double width = profile.assumed_min_obstacle_width_m.value_or(kDefaultMinObstacleWidthM);
+      s.thin_range = width / (2.0 * std::tan(0.5 * *spec.angular_resolution_deg * kDeg));
+    }
     // A sensor sits inside its own housing; that housing does not block its view.
     for (const Shape& shape : profile.geometry.shapes) {
       if (!shape.contains(s.origin)) {
@@ -190,6 +198,11 @@ SensingCapability derive_planar_sensing(const Profile& profile,
     // height in it is seen. Only the second makes a band count toward full-height coverage.
     const size_t nb = sensing.bands.size();
     std::vector<double> any_first(nb, kNever), any_last(nb, 0.0), all_first(nb, kNever), all_last(nb, 0.0);
+    // A band's reach is the end of its first unbroken stretch of view: something that steps
+    // into a blind gap farther out is not seen until it is near. Gaps up to kMaxSampleGapM are
+    // sampling, not blindness.
+    constexpr double kMaxSampleGapM = 0.1;
+    std::vector<bool> run_closed(nb, false);
     std::set<std::string> contributing;
 
     for (int i = 0; i <= samples; ++i) {
@@ -227,9 +240,11 @@ SensingCapability derive_planar_sensing(const Profile& profile,
           any_first[b] = std::min(any_first[b], s);
           any_last[b] = std::max(any_last[b], s);
         }
-        if (all) {
+        if (all && !run_closed[b]) {
           all_first[b] = std::min(all_first[b], s);
           all_last[b] = std::max(all_last[b], s);
+        } else if (!all && all_first[b] != kNever && s - all_last[b] > kMaxSampleGapM + 1e-9) {
+          run_closed[b] = true;
         }
       }
     }
@@ -277,20 +292,30 @@ SensingCapability derive_aerial_sensing(const CollisionCapability& collision,
                      std::cos(el * kDeg) * std::sin(az * kDeg), std::sin(el * kDeg));
       bin.edge_distance_m = collision.edge_distance_m(az * kDeg, el * kDeg);
       std::set<std::string> contributing;
+      // Reach is the end of the first unbroken stretch of view, as for planar bands.
+      double run_end = 0.0;
+      bool run_closed = false;
       for (int i = 0; i <= samples; ++i) {
         const double s = i * options.sample_step_m;
         const Vec3 p = (bin.edge_distance_m + s) * dir;
+        bool seen = false;
         for (const RangeSensor& sensor : sensors) {
           if (sensor.sees(p)) {
+            seen = true;
             bin.first_seen_m = std::min(bin.first_seen_m, s);
             bin.max_seen_m = std::max(bin.max_seen_m, s);
             contributing.insert(sensor.spec->id);
           }
         }
+        if (seen && !run_closed) {
+          run_end = s;
+        } else if (!seen && bin.seen() && s - run_end > 0.1 + 1e-9) {
+          run_closed = true;
+        }
       }
       bin.full_height_from_m = bin.first_seen_m;
       if (bin.seen() && bin.first_seen_m <= options.max_near_gap_m + 1e-9) {
-        bin.full_height_reach_m = bin.max_seen_m;
+        bin.full_height_reach_m = run_end;
       }
       bin.sensors.assign(contributing.begin(), contributing.end());
       sensing.bins.push_back(bin);
@@ -444,7 +469,22 @@ Capabilities derive_capabilities(const Profile& profile, const DeriveOptions& op
       caps.unreviewed_fields.push_back(field);
     }
   }
-  caps.safety_ready = caps.unreviewed_fields.empty();
+  if (m.space == MotionSpace::Aerial) {
+    // Straight up from the body, in each sensor's frame: inside its field of view?
+    for (const RangeSensor& s : sensors) {
+      const Vec3 q = s.to_sensor.linear() * Vec3::UnitZ();
+      const bool in_h = s.full_circle || std::abs(std::atan2(q.y(), q.x())) <= s.half_h + 1e-9;
+      const bool in_v = std::abs(std::atan2(q.z(), std::hypot(q.x(), q.y()))) <= s.half_v + 1e-9;
+      caps.sees_above = caps.sees_above || (in_h && in_v);
+    }
+    caps.max_flight_height_m = profile.assumed_max_flight_height_m.value_or(0.0);
+    if (!caps.sees_above && !profile.assumed_max_flight_height_m) {
+      caps.missing_fields.push_back(
+          "assumptions.max_flight_height_m (no range sensor sees above this drone, so it cannot "
+          "see a ceiling: declare the highest it may fly above the floor it starts on)");
+    }
+  }
+  caps.safety_ready = caps.unreviewed_fields.empty() && caps.missing_fields.empty();
   return caps;
 }
 

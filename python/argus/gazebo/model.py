@@ -157,19 +157,33 @@ def _wheel(name: str, xyz, radius: float, surface: str, sphere: bool = False) ->
             f'<visual name="tyre_visual"><geometry>{cyl}</geometry></visual></link>')
 
 
+JOINT_DAMPING = 0.05  # N m s/rad at a wheel's axle
+JOINT_FRICTION = 0.02  # N m
+
+
 def _joint(name: str, parent: str, child: str, effort: float, velocity: float,
-           lower: float = -1e16, upper: float = 1e16, damping: float = 0.05) -> str:
+           lower: float = -1e16, upper: float = 1e16, damping: float = JOINT_DAMPING) -> str:
     """A revolute joint about the child's z axis (the axle of a wheel link from `_wheel`)."""
     return (f'<joint name="{name}" type="revolute"><parent>{parent}</parent><child>{child}</child>'
             f"<axis><xyz>0 0 1</xyz><limit><lower>{lower:.6g}</lower><upper>{upper:.6g}</upper>"
             f"<effort>{effort:.6g}</effort><velocity>{velocity:.6g}</velocity></limit>"
-            f"<dynamics><damping>{damping}</damping><friction>0.02</friction></dynamics></axis></joint>")
+            f"<dynamics><damping>{damping}</damping><friction>{JOINT_FRICTION}</friction></dynamics></axis></joint>")
+
+
+# Rollers are not ideal: their bearings and rubber resist rolling a little, so a real mecanum
+# base drifts and strafes slower than its wheel speeds say (about 70-90% of the ideal speed
+# sideways in published measurements). Gazebo's own mecanum example uses mu2 0, which makes
+# strafing exact; a small mu2 gives the slip a real base has.
+ROLLER_MU2 = 0.08
 
 
 def _roller_surface(fdir: str) -> str:
-    """Friction along `fdir` (in the body frame) only, so the rollers turn freely across it."""
-    return (f'<surface><friction><ode><mu>1.0</mu><mu2>0.0</mu2><fdir1 gz:expressed_in="base_link">{fdir}'
+    """Friction mostly along `fdir` (in the body frame), a little across it (the rollers)."""
+    return (f'<surface><friction><ode><mu>1.0</mu><mu2>{ROLLER_MU2}</mu2><fdir1 gz:expressed_in="base_link">{fdir}'
             "</fdir1></ode></friction><contact><ode><kp>1e6</kp><kd>100</kd></ode></contact></surface>")
+
+
+STEER_P_GAIN = 4.0
 
 
 def _limits(lim: dict) -> str:
@@ -225,8 +239,10 @@ def model_sdf(doc: dict, name: str = "robot", pose=(0.0, 0.0, 0.0, 0.0), odom_sc
         vmax = max(vmax, max(abs(v) for v in motion["limits"]["y"]["velocity_mps"]))
     wheel_speed = 1.2 * vmax / radius
     driven = 4 if drive == "mecanum" else 2
-    # Enough torque for the declared acceleration with some to spare, no more.
-    effort = 1.5 * (mass + 4 * WHEEL_MASS_KG) * max(accel, decel) * radius / driven
+    # Enough torque for the declared acceleration with some to spare, plus what the joint's
+    # own damping and friction take at top speed, so the declared speed is reachable; no more.
+    effort = (1.5 * (mass + 4 * WHEEL_MASS_KG) * max(accel, decel) * radius / driven
+              + JOINT_DAMPING * vmax / radius + JOINT_FRICTION)
     yaw = motion["limits"]["yaw"]
 
     t = Topics(model=name, cmd_vel=f"/model/{name}/cmd_vel", odom=f"/model/{name}/odometry",
@@ -318,7 +334,10 @@ def model_sdf(doc: dict, name: str = "robot", pose=(0.0, 0.0, 0.0, 0.0), odom_sc
             "<right_steering_joint>front_right_steering_joint</right_steering_joint>"
             f"<wheel_separation>{separation:.6g}</wheel_separation><kingpin_width>{separation:.6g}</kingpin_width>"
             f"<wheel_base>{wheelbase:.6g}</wheel_base><steering_limit>{steer_limit:.6g}</steering_limit>"
-            f"<wheel_radius>{radius:.6g}</wheel_radius>" + _limits(lx) + common + "</plugin>")
+            # A steering servo settles in a fraction of a second; the plugin's default gain
+            # (1.0, about 1 s) made the first second of every full-lock turn too wide.
+            f"<wheel_radius>{radius:.6g}</wheel_radius><steer_p_gain>{STEER_P_GAIN}</steer_p_gain>"
+            + _limits(lx) + common + "</plugin>")
 
     truth = ('<plugin filename="gz-sim-odometry-publisher-system" name="gz::sim::systems::OdometryPublisher">'
              f"<odom_topic>{t.truth}</odom_topic><odom_frame>world</odom_frame>"

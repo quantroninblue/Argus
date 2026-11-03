@@ -34,7 +34,7 @@ from rclpy.qos import qos_profile_sensor_data
 from rosidl_runtime_py.utilities import get_message
 
 from .clearance import range_toward, room, snapshot
-from .live import ARGO_SETUP_TOPIC, _Probe, _wait
+from .live import _Probe, _wait, argo_in_setup_mode
 
 MARGIN_M = 0.5
 
@@ -71,7 +71,7 @@ class Calibration:
 class _Odom:
     def __init__(self, probe: _Probe, topic: str) -> None:
         self.probe = probe
-        self.samples: list[tuple] = []  # (t, vx, vy, wz, x, y)
+        self.samples: list[tuple] = []  # (t, vx, vy, wz, x, y, vz, z)
         self.lock = threading.Lock()
         self.sub = probe.node.create_subscription(get_message("nav_msgs/msg/Odometry"), topic, self._on,
                                                   qos_profile_sensor_data)
@@ -79,7 +79,8 @@ class _Odom:
     def _on(self, m) -> None:
         tw, p = m.twist.twist, m.pose.pose.position
         with self.lock:
-            self.samples.append((self.probe.now(), tw.linear.x, tw.linear.y, tw.angular.z, p.x, p.y))
+            self.samples.append((self.probe.now(), tw.linear.x, tw.linear.y, tw.angular.z, p.x, p.y,
+                                 tw.linear.z, p.z))
 
     def window(self, t0: float, t1: float) -> list[tuple]:
         with self.lock:
@@ -87,11 +88,12 @@ class _Odom:
 
 
 def _drive(probe: _Probe, pub, msg_type, period: float, vx: float, wz: float, seconds: float,
-           vy: float = 0.0) -> float:
+           vy: float = 0.0, vz: float = 0.0) -> float:
     """Publishes the command for `seconds` (node clock); returns when it started."""
     cmd = msg_type()
     cmd.linear.x = vx
     cmd.linear.y = vy
+    cmd.linear.z = vz
     cmd.angular.z = wz
     start = probe.now()
     while probe.now() - start < seconds:
@@ -109,13 +111,13 @@ def _crossing(samples: list[tuple], index: int, level: float, rising: bool) -> f
 
 
 def _straight_run(probe, pub, twist, period, odom, axis: str, sign: float, speed, accel, decel):
-    """One run along `axis` ("x" or "y") in direction `sign`: step up to `speed`, hold,
-    explicit stop. Returns (latency, accel, steady speed, braking) or None."""
+    """One run along `axis` ("x", "y" or, for drones, "z") in direction `sign`: step up to
+    `speed`, hold, explicit stop. Returns (latency, accel, steady speed, braking) or None."""
     ramp = speed / max(accel, 0.05)
-    vx, vy = (sign * speed, 0.0) if axis == "x" else (0.0, sign * speed)
-    t0 = _drive(probe, pub, twist, period, vx, 0.0, 1.5 * ramp + 1.5, vy)
+    v = {"x": (sign * speed, 0.0, 0.0), "y": (0.0, sign * speed, 0.0), "z": (0.0, 0.0, sign * speed)}[axis]
+    t0 = _drive(probe, pub, twist, period, v[0], 0.0, 1.5 * ramp + 1.5, v[1], v[2])
     t1 = _drive(probe, pub, twist, period, 0.0, 0.0, 1.5 * speed / max(decel, 0.05) + 1.0)
-    k = 1 if axis == "x" else 2
+    k = {"x": 1, "y": 2, "z": 6}[axis]
     along = lambda w: [(smp[0], sign * smp[k]) for smp in w]
     up = along(odom.window(t0, t1))
     down = along(odom.window(t1, probe.now()))
@@ -150,7 +152,31 @@ def _plan(doc: dict, probe) -> list[tuple[str, float, str, float]]:
             runs.append(("y", 1.0, "left", math.pi / 2))
         elif y[0] < 0.0:
             runs.append(("y", -1.0, "right", -math.pi / 2))
+    z = m["limits"].get("z", {}).get("velocity_mps", [0.0, 0.0])
+    if m.get("space") == "aerial":
+        # Vertical runs: the bearing is None and the room comes from heights (_vertical_room).
+        if z[1] > 0.0:
+            runs.append(("z", 1.0, "up", None))
+        if z[0] < 0.0:
+            runs.append(("z", -1.0, "down", None))
     return runs
+
+
+def _vertical_room(doc: dict, odom, sign: float, t: float) -> tuple[float | None, str]:
+    """Room above (sign > 0) or below the drone, from its odometry height. The floor is where
+    it started landed (ground_z_m in odom); above, the declared highest flight height."""
+    with odom.lock:
+        before = [smp for smp in odom.samples if smp[0] <= t]
+    if not before:
+        return None, "no odometry height"
+    z = before[-1][7]
+    floor = doc["geometry"].get("ground_z_m", 0.0)
+    if sign > 0:
+        top = (doc.get("assumptions") or {}).get("max_flight_height_m")
+        if not top:
+            return None, "no declared max_flight_height_m to measure climbing against"
+        return floor + float(top) - z, ""
+    return z - floor - 0.5, ""
 
 
 def _latest_pose(odom, t: float):
@@ -160,7 +186,9 @@ def _latest_pose(odom, t: float):
 
 
 def calibrate(doc: dict, sim_time: bool = False, direct: bool = False) -> Calibration:
-    """Needs rclpy initialised and clear space ahead of the robot."""
+    """Needs rclpy initialised and clear space ahead of the robot. A drone must already be
+    hovering (taken off by its flight controller) with room above and below for the vertical
+    runs."""
     out = Calibration(profile=copy.deepcopy(doc))
     new = out.profile
     m, control = new["motion"], new["control"]
@@ -180,7 +208,7 @@ def calibrate(doc: dict, sim_time: bool = False, direct: bool = False) -> Calibr
     period = 1.0 / control["rate_hz"]
     try:
         time.sleep(1.5)  # discovery
-        if not direct and probe.node.count_subscribers(ARGO_SETUP_TOPIC) == 0:
+        if not direct and not argo_in_setup_mode(probe):
             out.problems.append("Argo is not in setup mode; start 'argo --config argo.yaml --setup' on the "
                                 "robot (or pass --direct)")
             return out
@@ -200,10 +228,13 @@ def calibrate(doc: dict, sim_time: bool = False, direct: bool = False) -> Calibr
                 v = share * top_axis
                 need = v * v / (2 * a_decl) + 1.5 * v + v * v / (2 * d_decl) + MARGIN_M
                 seen = snapshot(probe, new)
-                clear = room(new, seen, bearing)
+                if bearing is None:
+                    clear, missing = _vertical_room(new, odom, sign, probe.now())
+                else:
+                    clear, missing = room(new, seen, bearing), "no range sensor looks that way"
                 if clear is None or clear < need:
                     why = (f"{name} run at {v:.2f} m/s needs {need:.1f} m of room, "
-                           + ("no range sensor looks that way" if clear is None else f"have {clear:.1f} m"))
+                           + (missing if clear is None else f"have {clear:.1f} m"))
                     (out.problems if name == "forward" else out.skipped).append(why)
                     break
                 wall_before = range_toward(new, seen, bearing) if axis == "x" and sign > 0 else None

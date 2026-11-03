@@ -23,9 +23,12 @@ import grpc
 
 from argus.protocol.v1 import app_pb2, app_pb2_grpc, node_messages_pb2
 
+from . import worlds as world_set
 from .designs import Bundle, DesignStore, DesignVersion, Finding
 from .gateway import Hub
 from .home import Home
+from .places import Place, PlaceError, Route, Stop
+from .validation import RUNNING, Job, Validator
 
 VERSION = "0.1.0"  # kept equal to pyproject.toml by a test
 DEFAULT_TOLERANCE_M = 0.4
@@ -47,7 +50,12 @@ class Caller:
 # What each call does, for authorisation: "read" looks, "control" changes what robots do.
 # "change" alters what the hub stores.
 ACTIONS = {"status": "read", "robots": "read", "watch": "read", "designs": "read", "design": "read",
-           "goal": "control", "cancel": "control", "add_design": "change"}
+           "worlds": "read", "jobs": "read", "job": "read", "places": "read", "routes": "read",
+           "go": "control", "patrol": "control",
+           "add_place": "change", "remove_place": "change", "add_route": "change", "remove_route": "change",
+           "goal": "control", "cancel": "control",
+           "add_design": "change", "validate": "change", "cancel_job": "change", "keep_job": "change",
+           "delete_job": "change"}
 
 
 def local_caller() -> Caller:
@@ -98,6 +106,9 @@ def robots_reply(hub: Hub, now: float) -> app_pb2.RobotsReply:
         st.evidence_demand_bytes_per_s = s.evidence_demand
         st.evidence_rate_bytes_per_s = s.evidence_rate
         st.evidence_dropped = s.evidence_dropped
+        errand = hub.dispatch.errand(robot.node_id)
+        if errand is not None:
+            st.errand = errand.describe()
     return reply
 
 
@@ -106,6 +117,37 @@ def design_message(v: DesignVersion) -> app_pb2.DesignVersion:
                                  has_gazebo_model=v.has_gazebo_model, profile_id=v.profile_id,
                                  findings=[app_pb2.Finding(severity=f.severity, where=f.where, text=f.text)
                                            for f in v.findings], runnable=v.runnable)
+
+
+def job_message(job: Job, validator: Validator) -> app_pb2.Job:
+    live = validator.live(job) if job.status == RUNNING else None
+    msg = app_pb2.Job(id=job.id, design=job.design, version=job.version, profile_id=job.profile_id, kind=job.kind,
+                      created=job.created, status=job.status, kept=job.kept,
+                      size_bytes=validator.jobs.size(job) if validator.jobs.path(job.id).is_dir() else 0)
+    for r in job.runs:
+        log_dir = validator.jobs.run_dir(job, r)
+        m = msg.runs.add(index=r.index, name=r.name, world=r.world, contents=r.contents, repeat=r.repeat,
+                         status=r.status, outcome=r.outcome, detail=r.detail, started=r.started, finished=r.finished,
+                         simulated_s=r.sim_time_s, log_dir=str(log_dir), has_replay=(log_dir / "replay").is_dir(),
+                         resource_path=r.resource_path)
+        for f in r.findings:
+            t = f.get("time_s")
+            m.findings.add(category=f["category"], rule=f["rule"], sentence=f["sentence"], signals=f.get("signals", []),
+                           has_time=bool(t), from_s=t[0] if t else 0.0, to_s=t[1] if t else 0.0)
+        if live is not None and live[0].index == r.index:
+            m.attach.update(live[1])
+    report = job.report or {}
+    msg.report.runs = report.get("runs", 0)
+    msg.report.outcomes.update(report.get("outcomes", {}))
+    msg.report.categories.update(report.get("categories", {}))
+    msg.report.rules.update(report.get("rules", {}))
+    msg.report.argus_runs.extend(report.get("argus_runs", []))
+    msg.report.unfinished = report.get("unfinished", 0)
+    return msg
+
+
+# Argo's events shown to watchers, by the name the hub gives them.
+REPORTED = {"safety_stop": "robot_paused", "step_failed": "robot_blocked"}
 
 
 class Events:
@@ -117,6 +159,7 @@ class Events:
         self.clock = clock
         self._watchers: list[asyncio.Queue] = []
         self._last: dict[str, tuple] = {}
+        self._events_seen: dict[str, int] = {}
 
     def subscribe(self) -> asyncio.Queue:
         q: asyncio.Queue = asyncio.Queue(maxsize=EVENT_QUEUE)
@@ -127,8 +170,8 @@ class Events:
         if q in self._watchers:
             self._watchers.remove(q)
 
-    def publish(self, kind: str, node_id: str = "", detail: str = "") -> None:
-        e = app_pb2.HubEvent(stamp=self.clock(), kind=kind, node_id=node_id, detail=detail)
+    def publish(self, kind: str, node_id: str = "", detail: str = "", job_id: str = "") -> None:
+        e = app_pb2.HubEvent(stamp=self.clock(), kind=kind, node_id=node_id, detail=detail, job_id=job_id)
         for q in self._watchers:
             if q.full():
                 q.get_nowait()
@@ -147,6 +190,15 @@ class Events:
                 self.publish("mission_changed", node_id, now[2])
             if now[3] != before[3]:
                 self.publish("failsafe_changed", node_id, "on" if now[3] else "off")
+            # What Argo reported about its way: a pause for something that stopped in it, or a
+            # step it could not take (the hub routes it another way).
+            seen = self._events_seen.get(node_id, 0)
+            for _, kind, waypoint, cause, detail in s.events[seen:]:
+                if kind in REPORTED:
+                    self.publish(REPORTED[kind], node_id, f"{cause}: {detail}" if detail else cause)
+            self._events_seen[node_id] = len(s.events)
+        for e in self.hub.dispatch.take_events():
+            self.publish(e.kind, e.node_id, e.detail)
 
 
 class AppService(app_pb2_grpc.HubAppServicer):
@@ -159,6 +211,9 @@ class AppService(app_pb2_grpc.HubAppServicer):
         self.clock = clock
         self.started_at = clock()
         self.designs = DesignStore(home.designs)
+        self.validator = Validator(home.jobs, self.designs,
+                                   publish=lambda kind, job_id, detail: events.publish(kind, detail=detail,
+                                                                                       job_id=job_id))
 
     async def _caller(self, context, action: str) -> Caller:
         caller = identify(context)
@@ -237,6 +292,142 @@ class AppService(app_pb2_grpc.HubAppServicer):
             report = capability_report(doc)
         return app_pb2.DesignReply(found=True, design=design_message(v), capability_report=report)
 
+    async def Worlds(self, request, context):
+        await self._caller(context, "worlds")
+        return app_pb2.WorldsReply(worlds=[app_pb2.WorldInfo(name=w.name, description=w.description)
+                                           for w in world_set.WORLDS.values()],
+                                   contents=list(world_set.CONTENTS))
+
+    async def StartValidation(self, request, context):
+        await self._caller(context, "validate")
+        try:
+            job = await asyncio.to_thread(self.validator.start, request.design, request.version, list(request.worlds),
+                                          list(request.contents), request.repeats or 1)
+        except ValueError as e:
+            return app_pb2.StartValidationReply(ok=False, detail=str(e))
+        return app_pb2.StartValidationReply(ok=True, job=job_message(job, self.validator),
+                                            detail=f"job {job.id}: {job.design} {job.version}, {len(job.runs)} runs")
+
+    async def Jobs(self, request, context):
+        await self._caller(context, "jobs")
+        jobs = await asyncio.to_thread(self.validator.jobs.all)
+        return app_pb2.JobsReply(jobs=[job_message(j, self.validator) for j in jobs])
+
+    async def Job(self, request, context):
+        await self._caller(context, "job")
+        job = self.validator.jobs.get(request.id)
+        if job is None:
+            return app_pb2.JobReply(found=False, detail=f"no job {request.id!r} (or more than one starts so)")
+        return app_pb2.JobReply(found=True, job=job_message(job, self.validator))
+
+    async def _job_change(self, context, action: str, change) -> app_pb2.Reply:
+        await self._caller(context, action)
+        try:
+            return app_pb2.Reply(ok=True, detail=change())
+        except ValueError as e:
+            return app_pb2.Reply(ok=False, detail=str(e))
+
+    async def CancelJob(self, request, context):
+        return await self._job_change(context, "cancel_job", lambda: self.validator.cancel(request.id))
+
+    async def KeepJob(self, request, context):
+        return await self._job_change(context, "keep_job", lambda: self.validator.keep(request.id, request.keep))
+
+    async def DeleteJob(self, request, context):
+        return await self._job_change(context, "delete_job", lambda: self.validator.delete(request.id))
+
+    async def _places_change(self, context, action: str, change) -> app_pb2.Reply:
+        await self._caller(context, action)
+        try:
+            return app_pb2.Reply(ok=True, detail=change())
+        except (PlaceError, KeyError, ValueError) as e:
+            return app_pb2.Reply(ok=False, detail=str(e).strip("'\""))
+
+    def _site_of(self, node_id: str) -> str:
+        robot = self.hub.registry.robot(node_id)
+        if robot is None:
+            raise KeyError(f"no robot {node_id!r} in {self.home.robots_file}")
+        return robot.site_id
+
+    async def AddPlace(self, request, context):
+        p = request.place
+
+        def add():
+            place = Place(p.name, (p.x, p.y, p.z), p.tolerance_m or DEFAULT_TOLERANCE_M,
+                          p.heading_rad if p.has_heading else None)
+            self.hub.dispatch.add_place(request.site, place, request.replace)
+            return f"{request.site}: place {p.name} at {p.x:g} {p.y:g} {p.z:g}"
+
+        return await self._places_change(context, "add_place", add)
+
+    async def PlaceHere(self, request, context):
+        def add():
+            site = self._site_of(request.node_id)
+            s = self.hub.sessions.get(request.node_id)
+            if s is None or s.pose is None:
+                raise ValueError(f"{request.node_id} has not reported where it is yet")
+            heading = s.yaw if request.with_heading and getattr(s, "yaw", None) is not None else None
+            place = Place(request.name, tuple(s.pose), request.tolerance_m or DEFAULT_TOLERANCE_M, heading)
+            self.hub.dispatch.add_place(site, place, request.replace)
+            x, y, z = s.pose
+            return f"{site}: place {request.name} at {x:.2f} {y:.2f} {z:.2f}, where {request.node_id} is"
+
+        return await self._places_change(context, "add_place", add)
+
+    async def Places(self, request, context):
+        await self._caller(context, "places")
+        reply = app_pb2.PlacesReply()
+        for site in [request.site] if request.site else self.hub.dispatch.sites():
+            entry = reply.sites.add(site=site)
+            for p in self.hub.dispatch.book(site).places().values():
+                entry.places.add(name=p.name, x=p.position[0], y=p.position[1], z=p.position[2],
+                                 tolerance_m=p.tolerance_m, has_heading=p.heading_rad is not None,
+                                 heading_rad=p.heading_rad or 0.0)
+        return reply
+
+    async def RemovePlace(self, request, context):
+        def remove():
+            self.hub.dispatch.book(request.site).remove_place(request.name)
+            return f"{request.site}: place {request.name} removed"
+
+        return await self._places_change(context, "remove_place", remove)
+
+    async def AddRoute(self, request, context):
+        r = request.route
+
+        def add():
+            route = Route(r.name, tuple(Stop(s.place, s.dwell_s) for s in r.stops), r.mode or "once",
+                          r.on_unreachable or "skip", r.cycles or None)
+            self.hub.dispatch.add_route(request.site, route, request.replace)
+            return f"{request.site}: route {r.name}, {len(r.stops)} stops, {route.mode}"
+
+        return await self._places_change(context, "add_route", add)
+
+    async def Routes(self, request, context):
+        await self._caller(context, "routes")
+        reply = app_pb2.RoutesReply()
+        for site in [request.site] if request.site else self.hub.dispatch.sites():
+            entry = reply.sites.add(site=site)
+            for r in self.hub.dispatch.book(site).routes().values():
+                entry.routes.add(name=r.name, stops=[app_pb2.RouteStop(place=s.place, dwell_s=s.dwell_s) for s in r.stops],
+                                 mode=r.mode, on_unreachable=r.on_unreachable, cycles=r.cycles or 0)
+        return reply
+
+    async def RemoveRoute(self, request, context):
+        def remove():
+            self.hub.dispatch.book(request.site).remove_route(request.name)
+            return f"{request.site}: route {request.name} removed"
+
+        return await self._places_change(context, "remove_route", remove)
+
+    async def Go(self, request, context):
+        return await self._places_change(
+            context, "go", lambda: f"{request.node_id}: " + self.hub.go(request.node_id, request.place, self.clock()))
+
+    async def Patrol(self, request, context):
+        return await self._places_change(
+            context, "patrol", lambda: f"{request.node_id}: " + self.hub.patrol(request.node_id, request.route, self.clock()))
+
     async def Watch(self, request, context):
         await self._caller(context, "watch")
         q = self.events.subscribe()
@@ -271,6 +462,7 @@ class AppServer:
         self.service = AppService(hub, home, self.events, robot_address, clock)
         self._server: grpc.aio.Server | None = None
         self._poller: asyncio.Task | None = None
+        self._validator: asyncio.Task | None = None
 
     async def start(self) -> None:
         self.home.secure_run_dir()
@@ -285,6 +477,7 @@ class AppServer:
         self._server.add_secure_port(f"unix:{sock}", grpc.local_server_credentials(grpc.LocalConnectionType.UDS))
         await self._server.start()
         self._poller = asyncio.ensure_future(self._poll())
+        self._validator = asyncio.ensure_future(self.service.validator.run_forever())
 
     async def _poll(self) -> None:
         while True:
@@ -294,6 +487,14 @@ class AppServer:
     async def stop(self) -> None:
         if self._poller:
             self._poller.cancel()
+        if self._validator:
+            # A run in progress is stopped (its processes and keys cleaned up) and marked
+            # interrupted; the job carries on when the hub starts again.
+            self._validator.cancel()
+            try:
+                await self._validator
+            except asyncio.CancelledError:
+                pass
         if self._server:
             await self._server.stop(0.5)
         self.home.socket.unlink(missing_ok=True)

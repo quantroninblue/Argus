@@ -1,0 +1,28 @@
+# Answers for the TurtleBot3 Waffle that ships with ROS 2 Jazzy (nav2_minimal_tb3_sim): what
+# its URDF cannot say. Limits from the public specification.
+id: turtlebot3-waffle
+motion:
+  space: planar
+  can_reverse: true
+  can_strafe: false
+  min_turn_radius_m: 0.0
+  collision_padding_m: 0.03
+  limits:
+    x: {velocity_mps: [-0.26, 0.26], accel_mps2: 0.5, decel_mps2: 1.0}
+    y: {velocity_mps: [0.0, 0.0]}
+    z: {velocity_mps: [0.0, 0.0]}
+    yaw: {rate_radps: 1.8, accel_radps2: 3.0}
+control: {interface: velocity, transport: ros2, endpoint: /cmd_vel, rate_hz: 20, latency_s: 0.08,
+          controller_timeout_s: 0.5}
+failsafe: {link_lost_after_s: 3.0, on_link_lost: stop, uncovered_motion: forbid}
+compute: {board: vicharak_axon, accelerator: rk3588_npu}
+sensors:
+  - {id: scan, kind: range_2d, frame: base_scan, source: {transport: ros2, endpoint: /scan}, rate_hz: 5,
+     range_m: [0.12, 3.5], fov_deg: {h: 360, v: 1.0}}
+  - {id: depth, kind: depth, frame: camera_depth_frame, source: {transport: ros2, endpoint: /camera/depth/image_raw},
+     rate_hz: 5, range_m: [0.2, 5.0], fov_deg: {h: 60, v: 46}}
+  - {id: imu, kind: imu, frame: imu_link, source: {transport: ros2, endpoint: /imu}, rate_hz: 100}
+  - {id: wheel_odom, kind: wheel_odom, frame: base_link, source: {transport: ros2, endpoint: /odom}, rate_hz: 30}
+assumptions:
+  min_obstacle_height_m: 0.15
+  clear_at_start_m: 0.5

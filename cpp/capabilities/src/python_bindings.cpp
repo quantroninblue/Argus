@@ -144,6 +144,9 @@ PYBIND11_MODULE(capabilities, m) {
       .def_readonly("assumed_obstacle_height_m", &Capabilities::assumed_obstacle_height_m)
       .def_readonly("assumed_clear_at_start_m", &Capabilities::assumed_clear_at_start_m)
       .def_readonly("safety_ready", &Capabilities::safety_ready)
+      .def_readonly("sees_above", &Capabilities::sees_above)
+      .def_readonly("max_flight_height_m", &Capabilities::max_flight_height_m)
+      .def_readonly("missing_fields", &Capabilities::missing_fields)
       .def_readonly("unreviewed_fields", &Capabilities::unreviewed_fields);
 
   m.def("validate_profile_text", &validate_profile_text, py::arg("text"),

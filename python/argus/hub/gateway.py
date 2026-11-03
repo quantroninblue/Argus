@@ -8,6 +8,7 @@ the connection is attached to that robot's session worker.
 
 from __future__ import annotations
 
+from argus.hub.dispatch import Dispatch
 from argus.hub.intake import Intake
 from argus.hub.mission import MissionState
 from argus.hub.registry import Registry
@@ -55,12 +56,14 @@ class Connection:
 
 class Hub:
     def __init__(self, registry: Registry, sites: SiteService | None = None,
-                 config: HubConfig | None = None) -> None:
+                 config: HubConfig | None = None, sites_dir=None) -> None:
         self.registry = registry
         self.sites = sites or SiteService()
         self.config = config or HubConfig()
         self.sessions: dict[str, HubSession] = {}
         self.intake = Intake(self.config.intake)
+        # Named places, routes and errands (hub plan N1); places live in `sites_dir`.
+        self.dispatch = Dispatch(sites_dir)
 
     def connect(self, identity: str | None = None) -> Connection:
         return Connection(self, identity)
@@ -76,17 +79,28 @@ class Hub:
         return s
 
     def set_goal(self, node_id: str, position, tolerance_m: float, now: float) -> None:
+        self.dispatch.end(node_id, "a goal was set by hand")
         self.session(node_id).mission.set_goal(position, tolerance_m, now)
 
     def cancel(self, node_id: str) -> None:
+        self.dispatch.end(node_id, "cancelled")
         self.session(node_id).mission.cancel()
+
+    def go(self, node_id: str, place: str, now: float) -> str:
+        s = self.session(node_id)
+        return self.dispatch.go(node_id, s.robot.site_id, place, s.mission, now)
+
+    def patrol(self, node_id: str, route: str, now: float) -> str:
+        s = self.session(node_id)
+        return self.dispatch.patrol(node_id, s.robot.site_id, route, s.mission, now)
 
     def mission_state(self, node_id: str) -> MissionState:
         return self.session(node_id).mission.state
 
     def step(self, now: float) -> None:
         self.intake.allocate([s for s in self.sessions.values() if s.connection is not None], now)
-        for s in self.sessions.values():
+        for node_id, s in self.sessions.items():
+            self.dispatch.step(node_id, s.mission, now)
             s.step(now)
 
     def _hello(self, connection: Connection, hello, now: float) -> None:

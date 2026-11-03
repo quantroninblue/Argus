@@ -74,3 +74,6 @@ compute:
 # the body is out of view until it has flown a little. Take off from a clear spot.
 assumptions:
   clear_at_start_m: 0.5
+  # No range sensor sees straight up, so the drone cannot see a ceiling: the highest it may
+  # fly above the floor it starts on is declared.
+  max_flight_height_m: 2.5

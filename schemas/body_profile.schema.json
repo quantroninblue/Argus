@@ -75,7 +75,7 @@
       "required": ["link_lost_after_s", "on_link_lost", "uncovered_motion"],
       "properties": {
         "link_lost_after_s": {"type": "number", "exclusiveMinimum": 0},
-        "on_link_lost": {"enum": ["stop", "hold", "finish_leg_then_stop", "return_home", "land"]},
+        "on_link_lost": {"enum": ["stop", "hold", "land"], "description": "With the hub unreachable Argo only stops and parks: stop (brake to a stop), hold (an aerial body hovers where it is, a ground body stops), land (descend where it is and stay)."},
         "uncovered_motion": {"enum": ["forbid", "creep"]},
         "creep_speed_mps": {"type": "number", "exclusiveMinimum": 0}
       },
@@ -93,12 +93,14 @@
       }
     },
     "assumptions": {
-      "description": "Declared facts about where the robot works. min_obstacle_height_m: obstacles stand on the ground and are at least this tall, so seeing any height up to it counts as seeing the column below it. clear_at_start_m: the space within this distance of the body where Argo starts is clear, so cells there that no sensor can see yet do not stop the first moves; whoever places the robot is responsible for it.",
+      "description": "Declared facts about where the robot works. min_obstacle_height_m: obstacles stand on the ground and are at least this tall, so seeing any height up to it counts as seeing the column below it. clear_at_start_m: the space within this distance of the body where Argo starts is clear, so cells there that no sensor can see yet do not stop the first moves; whoever places the robot is responsible for it. max_flight_height_m: the highest an aerial body's base may fly above the floor it starts on; required for a drone with no range sensor that sees straight up, since it cannot see a ceiling, and the user answers for it. min_obstacle_width_m: the thinnest obstacle where the robot works, 0.05 m when not given; used with each sensor's angular_resolution_deg.",
       "type": "object",
       "additionalProperties": false,
       "properties": {
         "min_obstacle_height_m": {"type": "number", "minimum": 0},
-        "clear_at_start_m": {"type": "number", "minimum": 0}
+        "clear_at_start_m": {"type": "number", "minimum": 0},
+        "max_flight_height_m": {"type": "number", "exclusiveMinimum": 0},
+        "min_obstacle_width_m": {"type": "number", "exclusiveMinimum": 0}
       }
     },
     "provenance": {
@@ -182,6 +184,8 @@
         },
         "rate_hz": {"type": "number", "exclusiveMinimum": 0},
         "max_age_s": {"type": "number", "exclusiveMinimum": 0},
+        "no_return": {"enum": ["free", "unknown"], "description": "What a ray with no return within range says about the space along it. free (the default): nothing is there up to the sensor's range. unknown: nothing can be said, for a sensor that also gets no return from dark, shiny or see-through surfaces."},
+        "angular_resolution_deg": {"type": "number", "exclusiveMinimum": 0, "description": "Horizontal angle between neighbouring rays (a lidar's angular step, or a depth camera's field of view over its image width). Coverage then stops where the gap between rays grows wider than assumptions.min_obstacle_width_m."},
         "range_m": {"$ref": "#/$defs/interval"},
         "fov_deg": {
           "type": "object",

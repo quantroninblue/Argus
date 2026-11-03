@@ -101,6 +101,7 @@ class Runtime {
   static void log_to_stderr(const std::string& line);
 
  private:
+  void say(const std::string& line);
   void poll_link(double now);
   void report(const node::TickResult& result, double now);
 
@@ -119,6 +120,9 @@ class Runtime {
   double request_for_s_ = 0.0;
   TickStats stats_;
   std::atomic<uint32_t> last_flags_{0};
+  std::string last_stall_;
+  double last_stall_at_ = -1e9;
+  static constexpr double kStallRepeatS = 5.0;
   std::vector<Odometry> odom_buffer_;
   std::vector<RangeFrame> frame_buffer_;
 };

@@ -1,5 +1,7 @@
 #include "argus/argo/runtime.hpp"
 
+#include <cmath>
+
 #include <chrono>
 #include <cstdio>
 #include <sstream>
@@ -43,12 +45,22 @@ double Runtime::wall_clock() {
 }
 
 void Runtime::log_to_stderr(const std::string& line) {
-  std::fprintf(stderr, "%.3f %s\n", wall_clock(), line.c_str());
+  std::fprintf(stderr, "%s\n", line.c_str());
+}
+
+// Every line starts with the runtime's own clock: simulated time in a simulation, so a run's
+// log lines up with its recording, and the robot's time on a robot.
+void Runtime::say(const std::string& line) {
+  char stamp[32];
+  std::snprintf(stamp, sizeof stamp, "%.3f ", clock_());
+  log_(stamp + line);
 }
 
 Runtime::Runtime(capabilities::Profile profile, RuntimeConfig config, Driver& driver, Clock clock, Log log)
     : config_(std::move(config)), driver_(driver), clock_(std::move(clock)), log_(std::move(log)) {
   config_.node.map.record_evidence = true;
+  // A slow plan must never hold up the control tick on the robot.
+  config_.node.plan_in_tick = false;
   node_ = std::make_unique<node::Node>(std::move(profile), config_.node);
   session_ = std::make_unique<node::Session>(*node_, config_.session);
   if (!config_.link.target.empty() && !config_.setup_mode) {
@@ -123,7 +135,7 @@ void Runtime::report(const node::TickResult& result, double now) {
     if (!e.waypoint_id.empty()) line << " waypoint=" << e.waypoint_id;
     if (e.cause != node::FailureCause::None) line << " cause=" << node::to_string(e.cause);
     if (!e.detail.empty()) line << " detail=\"" << e.detail << "\"";
-    log_(line.str());
+    say(line.str());
   }
   // Safety flags only when they change, so a robot standing still does not fill the log.
   if (result.safety_flags != last_flags_) {
@@ -131,17 +143,34 @@ void Runtime::report(const node::TickResult& result, double now) {
     line << "flags";
     for (const std::string& name : node::flag_names(result.safety_flags)) line << " " << name;
     if (result.safety_flags == 0) line << " none";
-    log_(line.str());
+    say(line.str());
     last_flags_ = result.safety_flags;
   }
-  (void)now;
+  // While Argo has somewhere to go but its planner proposes standing still, say why, once
+  // when that starts or changes and then every few seconds: the evidence that tells a planner
+  // stalled with clear options from a map with no way through.
+  const node::Proposal& p = result.proposal;
+  const bool still = p.velocity.linear.norm() < 1e-3 && std::abs(p.velocity.yaw_rate) < 1e-3;
+  if (p.has_target && still) {
+    std::ostringstream why;
+    why << "path=" << (p.path_exhausted ? "none" : p.path_reaches_target ? "reaches" : "partial")
+        << " target_blocked=" << (p.target_blocked ? 1 : 0) << " candidates=" << p.candidates
+        << " clear=" << p.clear_rollouts << " checked=" << p.admission_checks;
+    if (why.str() != last_stall_ || now - last_stall_at_ >= kStallRepeatS) {
+      say("planner still " + why.str());
+      last_stall_ = why.str();
+      last_stall_at_ = now;
+    }
+  } else {
+    last_stall_.clear();
+  }
 }
 
 void Runtime::run() {
   using namespace std::chrono;
   const auto period = duration_cast<steady_clock::duration>(duration<double>(period_s()));
   driver_.start(inbox_);
-  log_("start period_s=" + std::to_string(period_s()) + (link_ ? " hub=" + config_.link.target : " hub=none"));
+  say("start period_s=" + std::to_string(period_s()) + (link_ ? " hub=" + config_.link.target : " hub=none"));
   auto next = steady_clock::now();
   while (!stop_) {
     const auto begin = steady_clock::now();
@@ -170,7 +199,7 @@ void Runtime::run() {
   driver_.stop();
   std::ostringstream line;
   line << "stop ticks=" << stats_.ticks << " overruns=" << stats_.overruns << " worst_ms=" << stats_.worst_s * 1e3;
-  log_(line.str());
+  say(line.str());
 }
 
 }  // namespace argus::argo

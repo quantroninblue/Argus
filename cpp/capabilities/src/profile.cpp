@@ -64,8 +64,6 @@ const EnumTable<Transport> kTransports{{{"ros2", Transport::Ros2},
                                         {"custom", Transport::Custom}}};
 const EnumTable<LinkLostAction> kLinkLost{{{"stop", LinkLostAction::Stop},
                                            {"hold", LinkLostAction::Hold},
-                                           {"finish_leg_then_stop", LinkLostAction::FinishLegThenStop},
-                                           {"return_home", LinkLostAction::ReturnHome},
                                            {"land", LinkLostAction::Land}}};
 const EnumTable<UncoveredMotion> kUncovered{{{"forbid", UncoveredMotion::Forbid},
                                              {"creep", UncoveredMotion::Creep}}};
@@ -449,7 +447,8 @@ void read_sensors(Reader& r, const YAML::Node& node, const std::string& path,
       continue;
     }
     r.only_keys(s, where,
-                {"id", "kind", "frame", "source", "rate_hz", "max_age_s", "range_m", "fov_deg"});
+                {"id", "kind", "frame", "source", "rate_hz", "max_age_s", "range_m", "fov_deg",
+                 "angular_resolution_deg", "no_return"});
     SensorSpec sensor;
     sensor.id = r.text(s, "id", where, true).value_or("");
     if (!sensor.id.empty() && !std::regex_match(sensor.id, kIdPattern)) {
@@ -490,6 +489,19 @@ void read_sensors(Reader& r, const YAML::Node& node, const std::string& path,
       if (sensor.fov_v_deg && (*sensor.fov_v_deg < 0.0 || *sensor.fov_v_deg > 180.0)) {
         r.fail(where + ".fov_deg.v", "must be in [0, 180]");
       }
+    }
+    if (const auto no_return = r.text(s, "no_return", where, false)) {
+      if (*no_return == "free") {
+        sensor.no_return_is_free = true;
+      } else if (*no_return == "unknown") {
+        sensor.no_return_is_free = false;
+      } else {
+        r.fail(where + ".no_return", "must be free or unknown");
+      }
+    }
+    sensor.angular_resolution_deg = r.number(s, "angular_resolution_deg", where, false);
+    if (sensor.angular_resolution_deg && !(*sensor.angular_resolution_deg > 0.0)) {
+      r.fail(where + ".angular_resolution_deg", "must be above zero");
     }
     out.push_back(sensor);
   }
@@ -604,7 +616,8 @@ Profile parse(const YAML::Node& root) {
   }
 
   if (auto n = r.child(root, "assumptions", "", false); n && r.expect_map(n, "assumptions")) {
-    r.only_keys(n, "assumptions", {"min_obstacle_height_m", "clear_at_start_m"});
+    r.only_keys(n, "assumptions", {"min_obstacle_height_m", "clear_at_start_m", "max_flight_height_m",
+                                         "min_obstacle_width_m"});
     p.assumed_min_obstacle_height_m = r.number(n, "min_obstacle_height_m", "assumptions", false);
     if (p.assumed_min_obstacle_height_m && *p.assumed_min_obstacle_height_m < 0.0) {
       r.fail("assumptions.min_obstacle_height_m", "must not be negative");
@@ -612,6 +625,14 @@ Profile parse(const YAML::Node& root) {
     p.assumed_clear_at_start_m = r.number(n, "clear_at_start_m", "assumptions", false);
     if (p.assumed_clear_at_start_m && *p.assumed_clear_at_start_m < 0.0) {
       r.fail("assumptions.clear_at_start_m", "must not be negative");
+    }
+    p.assumed_max_flight_height_m = r.number(n, "max_flight_height_m", "assumptions", false);
+    if (p.assumed_max_flight_height_m && *p.assumed_max_flight_height_m <= 0.0) {
+      r.fail("assumptions.max_flight_height_m", "must be above zero");
+    }
+    p.assumed_min_obstacle_width_m = r.number(n, "min_obstacle_width_m", "assumptions", false);
+    if (p.assumed_min_obstacle_width_m && *p.assumed_min_obstacle_width_m <= 0.0) {
+      r.fail("assumptions.min_obstacle_width_m", "must be above zero");
     }
   }
 

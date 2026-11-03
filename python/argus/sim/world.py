@@ -1,4 +1,5 @@
-"""Worlds made of axis-aligned boxes over a floor at z = 0, and ray casting into them."""
+"""Worlds made of axis-aligned boxes over a floor at z = 0, with optional pits cut into the
+floor, and ray casting into them."""
 
 from __future__ import annotations
 
@@ -15,10 +16,28 @@ class World:
     name: str = "empty"
     # Boxes that walk a path (argus.sim.movers.Mover); `boxes` never move.
     movers: list = field(default_factory=list)
+    # Pits cut into the floor (a drop, a stairwell, a loading bay), one row per pit: min x,
+    # min y, max x, max y, depth. Straight sides; the floor around them is solid.
+    holes: np.ndarray = field(default_factory=lambda: np.zeros((0, 5)))
+    # Glass: boxes that depth cameras see and lidars do not (their beams pass through, or
+    # come back from whatever is behind). Solid for the robot all the same.
+    glass: np.ndarray = field(default_factory=lambda: np.zeros((0, 6)))
 
     def add(self, lo, hi) -> "World":
         self.boxes = np.vstack([self.boxes, np.asarray([*lo, *hi], dtype=float)])
         return self
+
+    def add_hole(self, lo, hi, depth: float) -> "World":
+        self.holes = np.vstack([self.holes, np.asarray([*lo, *hi, depth], dtype=float)])
+        return self
+
+    def add_glass(self, lo, hi) -> "World":
+        self.glass = np.vstack([self.glass, np.asarray([*lo, *hi], dtype=float)])
+        return self
+
+    def solid(self) -> np.ndarray:
+        """Every box the robot can run into, glass included."""
+        return np.vstack([self.boxes, self.glass]) if len(self.glass) else self.boxes
 
     def add_mover(self, mover) -> "World":
         self.movers.append(mover)
@@ -27,27 +46,45 @@ class World:
     def moving_at(self, t: float) -> "World":
         """Only the movers, where they are at time `t`."""
         boxes = np.array([m.box(t) for m in self.movers]) if self.movers else np.zeros((0, 6))
-        return World(boxes=boxes, name=self.name)
+        return World(boxes=boxes, name=self.name, holes=self.holes, glass=self.glass)
 
     def at(self, t: float) -> "World":
         """Everything, movers where they are at time `t`, for ray casting."""
         if not self.movers:
             return self
-        return World(boxes=np.vstack([self.boxes, self.moving_at(t).boxes]), name=self.name)
+        return World(boxes=np.vstack([self.boxes, self.moving_at(t).boxes]), name=self.name, holes=self.holes,
+                     glass=self.glass)
 
-    def raycast(self, origin: np.ndarray, dirs: np.ndarray, max_range: float) -> np.ndarray:
-        """Distance along each unit direction to the first box face or the floor; inf if none."""
+    def raycast(self, origin: np.ndarray, dirs: np.ndarray, max_range: float, see_glass: bool = True) -> np.ndarray:
+        """Distance along each unit direction to the first box face or the floor; inf if none.
+        With `see_glass` false (a lidar), glass boxes are not there."""
         origin = np.asarray(origin, dtype=float)
+        boxes = self.solid() if see_glass else self.boxes
         n = len(dirs)
         best = np.full(n, np.inf)
         down = dirs[:, 2] < -1e-9
         if origin[2] > 0.0:
             best[down] = -origin[2] / dirs[down, 2]
-        if len(self.boxes):
+            for x0, y0, x1, y1, depth in self.holes:
+                # Into the pit through its open top: the ray ends where it leaves the pit's
+                # volume, on its bottom or one of its sides.
+                p = origin[:2] + best[:, None] * dirs[:, :2]
+                inside = down & (p[:, 0] > x0) & (p[:, 0] < x1) & (p[:, 1] > y0) & (p[:, 1] < y1)
+                if not inside.any():
+                    continue
+                d = dirs[inside]
+                with np.errstate(divide="ignore", invalid="ignore"):
+                    inv = 1.0 / d
+                lo = (np.array([x0, y0, -depth]) - origin) * inv
+                hi = (np.array([x1, y1, 0.0]) - origin) * inv
+                lo = np.where(np.isnan(lo), -np.inf, lo)
+                hi = np.where(np.isnan(hi), np.inf, hi)
+                best[inside] = np.maximum(lo, hi).min(axis=1)
+        if len(boxes):
             with np.errstate(divide="ignore", invalid="ignore"):
                 inv = 1.0 / dirs
-            lo = (self.boxes[None, :, 0:3] - origin) * inv[:, None, :]
-            hi = (self.boxes[None, :, 3:6] - origin) * inv[:, None, :]
+            lo = (boxes[None, :, 0:3] - origin) * inv[:, None, :]
+            hi = (boxes[None, :, 3:6] - origin) * inv[:, None, :]
             # Rays parallel to a slab: inside it the slab never limits, outside it never hits.
             lo = np.where(np.isnan(lo), -np.inf, lo)
             hi = np.where(np.isnan(hi), np.inf, hi)

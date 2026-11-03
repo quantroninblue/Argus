@@ -134,9 +134,16 @@ struct Capabilities {
   double assumed_obstacle_height_m = 0.0;
   // Declared: space this far from the body where Argo starts is clear.
   double assumed_clear_at_start_m = 0.0;
-  // False while any field is still an unreviewed LLM draft.
+  // Aerial bodies: whether some range sensor's view includes straight up. Without one the
+  // drone cannot see a ceiling above it, and the profile must declare how high it may fly.
+  bool sees_above = false;
+  // Declared highest the base may fly above the floor it starts on (0 when not declared).
+  double max_flight_height_m = 0.0;
+  // False while any field is still an unreviewed LLM draft, or a field safety depends on is
+  // missing (missing_fields says which and why).
   bool safety_ready = true;
   std::vector<std::string> unreviewed_fields;
+  std::vector<std::string> missing_fields;
 };
 
 struct DeriveOptions {

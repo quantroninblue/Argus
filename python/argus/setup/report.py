@@ -71,10 +71,25 @@ def capability_report(doc: dict) -> str:
     else:
         lines.append("  no clear space declared where Argo starts (assumptions.clear_at_start_m): space next to "
                      "the robot that no sensor sees yet stops its first moves")
+    if doc.get("motion", {}).get("space") == "aerial":
+        if caps.sees_above:
+            lines.append("  a range sensor sees straight up: ceilings above the drone are seen")
+        elif caps.max_flight_height_m > 0:
+            lines.append(f"  WARNING: no range sensor sees above this drone, so it cannot see a ceiling. "
+                         f"It will not fly higher than the declared {caps.max_flight_height_m:g} m above "
+                         "the floor it starts on (assumptions.max_flight_height_m); you answer for that height")
+        else:
+            lines.append("  WARNING: no range sensor sees above this drone, so it cannot see a ceiling. "
+                         "Declare assumptions.max_flight_height_m, the highest it may fly above the floor "
+                         "it starts on; it will not move until you do")
     lines.append("")
     prov = doc.get("provenance", {})
     unverified = sorted(k for k, v in prov.items() if v in ("declared", "cad", "llm_draft"))
     lines.append("Still to verify: " + (", ".join(unverified) if unverified else "nothing"))
-    lines.append("Ready to drive: " + ("yes" if caps.safety_ready else
-                                       "no, unreviewed: " + ", ".join(caps.unreviewed_fields)))
+    if caps.safety_ready:
+        lines.append("Ready to drive: yes")
+    else:
+        why = [f"unreviewed: {', '.join(caps.unreviewed_fields)}"] if caps.unreviewed_fields else []
+        why += [f"missing {m}" for m in caps.missing_fields]
+        lines.append("Ready to drive: no, " + "; ".join(why))
     return "\n".join(lines)

@@ -4,10 +4,20 @@
 //
 // Drives the body in simulated time through a room with a wall and pillars, ray casting its
 // range sensors at their declared rates, and times every call into the core with the wall
-// clock: each range frame (map update and view marking) and each control tick (planner and
-// safety supervisor). Budgets: a tick within half the control period at the 99th percentile
-// and at worst within the period itself; each sensor's frames within half its frame period at
-// the 99th percentile; and all of it under half of one core. Exits 1 when a budget is missed.
+// clock: each range frame (map update and view marking), each control tick (safety
+// supervisor), and each plan. The planner runs here inside the tick, deterministically; on the
+// robot it has a thread of its own (NodeConfig::plan_in_tick), so ticks that planned are timed
+// as plans. Budgets: a control tick within half the control period at the 99th percentile and
+// at worst within the period itself; a plan within half the planner period at the 99th
+// percentile and at worst within the period; each sensor's frames within half its frame
+// period at the 99th percentile; and all of it under half of one core. Exits 1 when a budget
+// is missed.
+//
+// Each stage inside a frame and a tick is timed too (Node::stage_times), against a share of
+// its parent's budget (the frame budget of the fastest sensor, or the tick budget): what
+// every feature costs shows, and one that grows too heavy fails here. The link's work is
+// timed as Argo's session does it (evidence taken from the map and encoded every 0.5 s),
+// and kept under its own share of a core so planning never starves it.
 
 #include <algorithm>
 #include <chrono>
@@ -22,6 +32,7 @@
 #include "argus/capabilities/capabilities.hpp"
 #include "argus/capabilities/profile.hpp"
 #include "argus/node/node.hpp"
+#include "argus/node/session.hpp"
 
 namespace {
 
@@ -126,7 +137,13 @@ int main(int argc, char** argv) {
     std::fprintf(stderr, "%s\n", e.what());
     return 2;
   }
-  argus::node::Node node(profile);
+  argus::node::NodeConfig config;
+  config.map.record_evidence = true;
+  argus::node::Node node(profile, config);
+  node.stage_times().enabled = true;
+  argus::node::EvidenceOutbox outbox(1, 400000, 1u << 30);
+  Stats link;
+  double next_evidence = 0.0;
   const auto& prof = node.profile();
   const bool aerial = node.capabilities().motion.space == argus::capabilities::MotionSpace::Aerial;
   const double period = node.control_period_s();
@@ -159,6 +176,7 @@ int main(int argc, char** argv) {
   plan.waypoints.push_back({"far", Vec3(5.0, 1.5, pose.position.z()), 0.4});
 
   Stats tick;
+  Stats planning;
   argus::node::Twist vel;
   bool planned = false;
   for (double t = 0.0; t < seconds; t += period) {
@@ -185,12 +203,21 @@ int main(int argc, char** argv) {
       node.on_range_frame(frame);
       s.stats.add(now_ms() - a);
     }
+    if (t + 1e-9 >= next_evidence) {
+      next_evidence = t + 0.5;
+      const double a = now_ms();
+      outbox.add(node.take_evidence());
+      while (const auto batch = outbox.next(1u << 20, t)) {
+        outbox.ack(batch->seq);
+      }
+      link.add(now_ms() - a);
+    }
     if (!planned) {
       planned = node.set_plan(plan, t);
     }
     const double a = now_ms();
     const argus::node::TickResult r = node.tick(t);
-    tick.add(now_ms() - a);
+    (node.last_tick_planned() ? planning : tick).add(now_ms() - a);
     // Follow the command as a perfect plant would.
     vel = r.command.stop ? argus::node::Twist{} : r.command.velocity;
     if (aerial) {
@@ -210,11 +237,41 @@ int main(int argc, char** argv) {
   };
   std::printf("%s: %.0f s simulated, control %.0f Hz\n", prof.id.c_str(), seconds, 1.0 / period);
   line("tick", tick, 500.0 * period, 1000.0 * period);
-  double busy = tick.total_ms;
+  const double plan_period = argus::node::NodeConfig{}.planner.period_s;
+  line("plan", planning, 500.0 * plan_period, 1000.0 * plan_period);
+  double busy = tick.total_ms + planning.total_ms;
   for (const Sensor& s : sensors) {
     line(("frame " + s.id).c_str(), s.stats, 500.0 * s.period, 1000.0 * s.period);
     busy += s.stats.total_ms;
   }
+  // Stages, against a share of their parent's budget: each sensor's frame budget, or the tick's.
+  auto& stages = node.stage_times().ms;
+  auto stage = [&](const std::string& name, double frac, double parent) {
+    Stats st;
+    for (double v : stages[name]) {
+      st.add(v);
+    }
+    line(("  " + name).c_str(), st, frac * parent, 2.0 * frac * parent);
+  };
+  const std::pair<const char*, double> frame_shares[] = {
+      {"frame health", 0.05},         {"frame rays", 0.25}, {"frame drop edges", 0.15}, {"frame tracking", 0.25},
+      {"frame odometry alarm", 0.25}, {"frame map", 0.5},   {"frame view", 0.5},
+  };
+  for (const Sensor& s : sensors) {
+    for (const auto& [name, frac] : frame_shares) {
+      stage(std::string(name) + " " + s.id, frac, 500.0 * s.period);
+    }
+  }
+  stage("tick movers", 0.25, 500.0 * period);
+  stage("tick supervisor", 0.5, 500.0 * period);
+  // The link has threads of its own on the robot: each round must finish well within the
+  // evidence period, and the whole within its share of a core (below).
+  line("link evidence", link, 250.0, 500.0);
+  busy += link.total_ms;
+  const double link_share = link.total_ms / (1000.0 * seconds);
+  const bool link_ok = link_share <= 0.1;
+  ok = ok && link_ok;
+  std::printf("%-22s %.1f%% of one core (budget 10%%)  %s\n", "link total", 100.0 * link_share, link_ok ? "ok" : "MISSED");
   const double share = busy / (1000.0 * seconds);
   const bool cpu_ok = share <= 0.5;
   ok = ok && cpu_ok;

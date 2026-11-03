@@ -105,6 +105,17 @@ class _Probe:
         self.node.destroy_node()
 
 
+def argo_in_setup_mode(probe: _Probe, wall_timeout_s: float = 10.0) -> bool:
+    """Whether Argo's setup topic has a subscriber, waiting for discovery up to the timeout:
+    a fixed short wait missed an Argo that had only just started."""
+    deadline = time.monotonic() + wall_timeout_s
+    while time.monotonic() < deadline:
+        if probe.node.count_subscribers(ARGO_SETUP_TOPIC) > 0:
+            return True
+        time.sleep(0.1)
+    return False
+
+
 def _wait(probe: _Probe, seconds: float) -> None:
     """Waits `seconds` of the node's clock (simulated time when that is in use)."""
     start = probe.now()
@@ -191,7 +202,7 @@ def _clear_ahead(probe: _Probe, doc: dict, stats: dict | None = None) -> float |
 def _timeout_check(probe: _Probe, doc: dict, wheels_up: bool, stats: dict, result: LiveResult,
                    direct: bool = False) -> None:
     control = doc["control"]
-    if not direct and probe.node.count_subscribers(ARGO_SETUP_TOPIC) == 0:
+    if not direct and not argo_in_setup_mode(probe):
         result.checks.append(Check("controller timeout", False, "not run: Argo is not in setup mode; start "
                                    "'argo --config argo.yaml --setup' on the robot (or pass --direct)"))
         return
@@ -260,6 +271,18 @@ def _timeout_check(probe: _Probe, doc: dict, wheels_up: bool, stats: dict, resul
         probe.node.destroy_subscription(sub)
 
 
+def _mount_checks(probe: _Probe, doc: dict, result: LiveResult) -> None:
+    """Each sensor where the profile says it is (mounts.py), with the robot on a flat floor."""
+    from .clearance import base_points, snapshot
+    from .mounts import check_mounts
+
+    found = check_mounts(doc, base_points(doc, snapshot(probe, doc)))
+    if not found:
+        result.checks.append(Check("mounts", True, "no sensor sees enough floor or shared surfaces to check its mount"))
+    for f in found:
+        result.checks.append(Check(f.name, f.ok, f.detail + ("" if "floor" not in f.name else " (robot on a flat floor)")))
+
+
 def live_check(doc: dict, duration_s: float = 5.0, motion: bool = False, wheels_up: bool = False,
                sim_time: bool = False, direct: bool = False) -> LiveResult:
     """Runs against the ROS 2 graph this process can see. Needs rclpy initialised."""
@@ -269,6 +292,7 @@ def live_check(doc: dict, duration_s: float = 5.0, motion: bool = False, wheels_
     try:
         time.sleep(1.5)  # discovery, in wall time: simulated time may not be running yet
         stats = _topic_checks(probe, doc, duration_s, result)
+        _mount_checks(probe, doc, result)
         if motion:
             _timeout_check(probe, doc, wheels_up, stats, result, direct)
     finally:

@@ -1,0 +1,10 @@
+#!/bin/sh
+# Runs the argus command from this checkout: python/ and the built modules in build/python.
+# Put it on your PATH once, for example:  ln -s "$PWD/tools/argus" ~/.local/bin/argus
+here=$(dirname "$(readlink -f "$0")")
+root=$(dirname "$here")
+if [ ! -d "$root/build/python/argus" ]; then
+  echo "argus is not built yet: run tools/check.sh in $root first" >&2
+  exit 1
+fi
+PYTHONPATH="$root/python:$root/build/python${PYTHONPATH:+:$PYTHONPATH}" exec python3 -m argus "$@"

@@ -53,7 +53,13 @@ class HubSession:
         if not self.planner.planar:
             floor, ceiling = sites.heights(robot.site_id)
             room = self.planner.min_clearance_m
-            self.mission.z_limits = (floor + room, math.nan if ceiling is None else ceiling - room)
+            top = math.inf if ceiling is None else ceiling - room
+            # A drone that cannot see above itself declares how high it may fly; routes keep
+            # under that too (the base's height above the site floor).
+            declared = (profile.doc.get("assumptions") or {}).get("max_flight_height_m")
+            if declared:
+                top = min(top, floor + float(declared))
+            self.mission.z_limits = (floor + room, math.nan if math.isinf(top) else top)
         self.connection = None
         self.session_id = ""
         self.generation = 0

@@ -112,8 +112,8 @@ bool BodyVolume::column_out_of_vertical_view(const LocalMap& map, const Pose4& p
   return covered && !in_view;
 }
 
-Contact BodyVolume::contact(const LocalMap& map, const Pose4& pose, const Pose4* here) const {
-  return planar_ ? planar_contact(map, pose, here) : aerial_contact(map, pose, here);
+Contact BodyVolume::contact(const LocalMap& map, const Pose4& pose, const Pose4* here, bool* blind_above) const {
+  return planar_ ? planar_contact(map, pose, here) : aerial_contact(map, pose, here, blind_above);
 }
 
 Contact BodyVolume::planar_contact(const LocalMap& map, const Pose4& pose, const Pose4* here) const {
@@ -162,7 +162,7 @@ Contact BodyVolume::planar_contact(const LocalMap& map, const Pose4& pose, const
   return Contact::Free;
 }
 
-Contact BodyVolume::aerial_contact(const LocalMap& map, const Pose4& pose, const Pose4* here) const {
+Contact BodyVolume::aerial_contact(const LocalMap& map, const Pose4& pose, const Pose4* here, bool* blind_above) const {
   const double res = map.resolution();
   const double slack = res * 0.87;
   const Vec3 p = pose.position;
@@ -190,8 +190,12 @@ Contact BodyVolume::aerial_contact(const LocalMap& map, const Pose4& pose, const
         }
         bool covered = false;
         bool in_view = false;
-        if (state == Cell::Unknown && !here_cell && !map.viewed(i) && !out_of_vertical_view(pose, c, covered, in_view)) {
-          ++unknown;
+        if (state == Cell::Unknown && !here_cell && !map.viewed(i)) {
+          if (!out_of_vertical_view(pose, c, covered, in_view)) {
+            ++unknown;
+          } else if (blind_above && here && c.z() > here->position.z() + radius_) {
+            *blind_above = true;
+          }
         }
       }
     }

@@ -42,6 +42,11 @@ failsafe: {link_lost_after_s: 3.0, on_link_lost: stop, uncovered_motion: forbid}
 compute: {board: vicharak_axon, accelerator: rk3588_npu}
 sensors:
   - {id: wheel_odom, kind: wheel_odom, frame: base_link, source: {transport: ros2, endpoint: /odom}, rate_hz: 50}
+assumptions:
+  clear_at_start_m: 0.5
+  # Drones with no range sensor that sees straight up cannot see a ceiling. They must declare
+  # the highest they may fly above the floor they start on; you answer for that height.
+  # max_flight_height_m: 2.5
 """
 
 
@@ -83,8 +88,42 @@ def _urdf_sensors(body: UrdfBody) -> list[dict]:
             d["range_m"] = [round(s.range_m[0], 4), round(s.range_m[1], 4)]
         if s.fov_deg and s.kind in ("range_2d", "range_3d", "depth", "rgb"):
             d["fov_deg"] = {"h": round(s.fov_deg[0], 3), "v": round(s.fov_deg[1], 3)}
+        if s.angular_resolution_deg and s.kind in ("range_2d", "range_3d", "depth"):
+            d["angular_resolution_deg"] = round(s.angular_resolution_deg, 4)
         out.append(d)
     return out
+
+
+# Rotation from a camera body frame (x forward, y left, z up) to its optical frame (z forward,
+# x right, y down), as ROS camera drivers stamp their images (REP 103).
+_BODY_TO_OPTICAL = np.array([[0.0, 0.0, 1.0], [-1.0, 0.0, 0.0], [0.0, -1.0, 0.0]])
+
+
+def _is_optical(rotation: np.ndarray) -> bool:
+    """A frame whose z axis points level, outward, and whose y axis points down: an optical
+    frame, whatever its name."""
+    z_axis, y_axis = rotation[:, 2], rotation[:, 1]
+    return abs(z_axis[2]) < 0.5 and y_axis[2] < -0.5
+
+
+def _camera_frames(doc: dict, body: UrdfBody, sensors: list[dict], notes: list[str]) -> None:
+    """Cameras whose frame is an optical frame get the same mount turned to look along x,
+    which is how Argus reads every sensor frame; the frame itself is kept as it is."""
+    names = {identifier(n): n for n in body.frames}
+    for s in sensors:
+        if s.get("kind") not in ("depth", "rgb") or s.get("frame") not in names:
+            continue
+        t = body.frames[names[s["frame"]]]
+        if not _is_optical(t[:3, :3]):
+            continue
+        looking = np.eye(4)
+        looking[:3, :3] = t[:3, :3] @ _BODY_TO_OPTICAL.T
+        looking[:3, 3] = t[:3, 3]
+        name = f"{s['frame']}_x_forward"
+        doc["geometry"]["frames"][name] = frame_pose(looking)
+        notes.append(f"{s['id']}: {s['frame']} is an optical frame (z forward, y down); Argus uses the same "
+                     f"mount looking along x, as frame {name}")
+        s["frame"] = name
 
 
 def build_profile(urdf: str | Path, answers: dict, base_frame: str | None = None,
@@ -120,6 +159,7 @@ def build_profile(urdf: str | Path, answers: dict, base_frame: str | None = None
         sensors.append(s)
         if sid:
             provenance[f"sensors.{sid}"] = "declared"
+    _camera_frames(doc, body, sensors, notes)
     doc["sensors"] = sensors
     provenance.update(answer_provenance)
     doc["provenance"] = provenance
@@ -132,6 +172,10 @@ def build_profile(urdf: str | Path, answers: dict, base_frame: str | None = None
         if s.get("frame") and s["frame"] not in doc["geometry"]["frames"]:
             problems.append(f"sensors.{s.get('id')}.frame: no link {s['frame']!r} in the URDF")
     problems += [p for p in profiles.problems(doc) if p not in problems]
+    if not problems:
+        caps = profiles.derive(doc)
+        for field in caps.missing_fields:
+            problems.append(f"{field}; add it under assumptions in the answers file")
     return doc, problems, notes
 
 

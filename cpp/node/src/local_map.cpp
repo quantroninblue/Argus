@@ -25,6 +25,10 @@ LocalMap::LocalMap(const LocalMapConfig& config) : config_(config) {
   log_odds_.assign(n, 0);
   observed_.assign(n, 0);
   viewed_.assign(n, 0);
+  free_frames_.assign(n, 0);
+  last_free_frame_.assign(n, 0);
+  ever_free_.assign(n, 0);
+  drop_.assign(n, 0);
   if (config_.record_evidence) {
     pending_.assign(n, 0);
     pending_set_.assign(n, 0);
@@ -51,7 +55,18 @@ Cell LocalMap::cell(const Index3& i) const {
     return Cell::Unknown;
   }
   const size_t s = slot(i);
+  if (drop_[s]) {
+    return Cell::Occupied;
+  }
   return grid::cell_state(observed_[s] != 0, log_odds_[s]);
+}
+
+int LocalMap::log_odds(const Index3& i) const {
+  if (!contains(i)) {
+    return 0;
+  }
+  const size_t s = slot(i);
+  return observed_[s] ? log_odds_[s] : 0;
 }
 
 bool LocalMap::viewed(const Index3& i) const { return contains(i) && viewed_[slot(i)] != 0; }
@@ -60,6 +75,87 @@ void LocalMap::mark_viewed(const Index3& i) {
   if (contains(i)) {
     viewed_[slot(i)] = 1;
   }
+}
+
+bool LocalMap::drop(const Index3& i) const { return contains(i) && drop_[slot(i)] != 0; }
+
+void LocalMap::mark_drop(const Index3& i) {
+  if (contains(i)) {
+    drop_[slot(i)] = 1;
+  }
+}
+
+void LocalMap::clear_drop_column(const Index3& i) {
+  if (!contains(i)) {
+    return;
+  }
+  Index3 c = i;
+  for (c.z() = min_.z(); c.z() < min_.z() + dims_.z(); ++c.z()) {
+    drop_[slot(c)] = 0;
+  }
+}
+
+void LocalMap::forget(const Index3& i) {
+  if (!contains(i)) {
+    return;
+  }
+  const size_t s = slot(i);
+  log_odds_[s] = 0;
+  observed_[s] = 0;
+  viewed_[s] = 0;
+  free_frames_[s] = 0;
+  ever_free_[s] = 0;
+}
+
+namespace {
+
+// The 18-neighbourhood: faces and edges of the cube. `f` gets the neighbour and its dz.
+template <typename F>
+void for_each_neighbour(const Index3& i, F&& f) {
+  for (int dx = -1; dx <= 1; ++dx) {
+    for (int dy = -1; dy <= 1; ++dy) {
+      for (int dz = -1; dz <= 1; ++dz) {
+        const int n = std::abs(dx) + std::abs(dy) + std::abs(dz);
+        if (n == 1 || n == 2) {
+          f(Index3(i.x() + dx, i.y() + dy, i.z() + dz), dz);
+        }
+      }
+    }
+  }
+}
+
+}  // namespace
+
+bool LocalMap::ever_free(const Index3& i) const { return contains(i) && ever_free_[slot(i)] != 0; }
+
+void LocalMap::try_ever_free(const Index3& i, size_t s) {
+  // Dynablox asks for every neighbour observed and not occupied. A single scan plane never
+  // observes the cells above and below it, so an unobserved neighbour above or below no
+  // sensor can see does not count (set_vertically_unseen). One inside a box, under its top
+  // edge, still does.
+  bool clear = true;
+  for_each_neighbour(i, [&](const Index3& n, int dz) {
+    if (!clear) {
+      return;
+    }
+    const Cell c = contains(n) ? cell(n) : Cell::Unknown;
+    if (c == Cell::Occupied ||
+        (c == Cell::Unknown && (dz == 0 || !contains(n) || !vertically_unseen_ || !vertically_unseen_(n)))) {
+      clear = false;
+    }
+  });
+  ever_free_[s] = clear ? 1 : 0;
+}
+
+void LocalMap::revoke_ever_free(const Index3& i) {
+  if (contains(i)) {
+    ever_free_[slot(i)] = 0;
+  }
+  for_each_neighbour(i, [&](const Index3& n, int) {
+    if (contains(n)) {
+      ever_free_[slot(n)] = 0;
+    }
+  });
 }
 
 Index3 LocalMap::index_of_slot(size_t s) const {
@@ -102,6 +198,10 @@ void LocalMap::clear_slab(int axis, int r) {
       log_odds_[s] = 0;
       observed_[s] = 0;
       viewed_[s] = 0;
+      free_frames_[s] = 0;
+      last_free_frame_[s] = 0;
+      ever_free_[s] = 0;
+      drop_[s] = 0;
     }
   }
 }
@@ -127,6 +227,7 @@ void LocalMap::recenter(const Vec3& base) {
       std::fill(log_odds_.begin(), log_odds_.end(), 0);
       std::fill(observed_.begin(), observed_.end(), 0);
       std::fill(viewed_.begin(), viewed_.end(), 0);
+      std::fill(drop_.begin(), drop_.end(), 0);
       break;
     }
     for (int j = lo; j < hi; ++j) {
@@ -142,6 +243,25 @@ void LocalMap::update(const Index3& i, int delta) {
   const size_t s = slot(i);
   const int8_t before = log_odds_[s];
   log_odds_[s] = grid::add_log_odds(before, delta);
+  if (delta < 0) {
+    // Seen free in this frame: count it once per frame, and see whether it is now ever-free.
+    if (last_free_frame_[s] != frame_) {
+      last_free_frame_[s] = frame_;
+      if (free_frames_[s] < 255) {
+        ++free_frames_[s];
+      }
+      if (!ever_free_[s] && free_frames_[s] >= config_.ever_free_burn_in) {
+        try_ever_free(i, s);
+      }
+    }
+  } else if (delta > 0) {
+    // Occupied now: it starts its burn-in again. Its neighbours keep ever-free, as in
+    // Dynablox, where only a voxel occupied for many frames takes it from them (Argo does that
+    // in Node, static_after_s); revoking them on every hit let a walker's first returns keep
+    // the space just ahead of it from ever counting as free.
+    free_frames_[s] = 0;
+    ever_free_[s] = 0;
+  }
   if (config_.record_evidence) {
     // Record the change actually made, so the hub's cell follows this one step for step.
     pending_[s] = static_cast<int16_t>(pending_[s] + log_odds_[s] - before);
@@ -155,6 +275,9 @@ void LocalMap::update(const Index3& i, int delta) {
 
 void LocalMap::integrate(const Vec3& origin, const std::vector<Vec3>& ends,
                          const std::vector<bool>& hits) {
+  if (++frame_ == 0) {
+    frame_ = 1;  // 0 is "never counted"
+  }
   tracer_.trace(
       origin, ends, hits, config_.resolution_m, [this](const Index3& i) { return contains(i); },
       [this](const Index3& i, int delta) { update(i, delta); });

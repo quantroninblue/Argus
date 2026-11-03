@@ -39,6 +39,7 @@ message RobotStatus {
   double evidence_demand_bytes_per_s = 13;
   double evidence_rate_bytes_per_s = 14;
   uint64 evidence_dropped = 15;
+  string errand = 16;  // the route and stop the robot is on, empty without an errand
 }
 
 message RobotsReply {
@@ -67,12 +68,14 @@ message Reply {
 message WatchRequest {}
 
 // Something that changed on the hub. Kinds: robot_connected, robot_disconnected,
-// link_changed, mission_changed, failsafe_changed; more as features arrive.
+// link_changed, mission_changed, failsafe_changed; for validation jobs job_queued,
+// run_started, run_finished, job_finished (with job_id set).
 message HubEvent {
   double stamp = 1;  // Unix time
   string kind = 2;
   string node_id = 3;
   string detail = 4;
+  string job_id = 5;
 }
 
 // A robot design: the user's URDF with its meshes, optional Gazebo model and answers file,
@@ -136,6 +139,195 @@ message DesignReply {
   string capability_report = 4;  // empty when no profile could be built
 }
 
+// Validation jobs: a stored design driven through Gazebo worlds, one run at a time, each run
+// diagnosed from its log (argus.hub.validation). Gazebo runs without a window on the hub; the
+// argus command attaches one to the live run on request, and plays finished runs back from
+// the state Gazebo recorded.
+
+message WorldsRequest {}
+
+message WorldInfo {
+  string name = 1;
+  string description = 2;
+}
+
+message WorldsReply {
+  repeated WorldInfo worlds = 1;
+  repeated string contents = 2;  // what a world may hold: objects, movers, empty
+}
+
+message StartValidationRequest {
+  string design = 1;
+  string version = 2;            // a prefix is enough; empty means the latest
+  repeated string worlds = 3;    // empty means every world
+  repeated string contents = 4;  // empty means objects
+  uint32 repeats = 5;            // 0 means 1
+}
+
+message RunFinding {
+  string category = 1;  // design, argus, world, inconclusive
+  string rule = 2;
+  string sentence = 3;
+  repeated string signals = 4;  // files or topics in the run log that show it
+  bool has_time = 5;
+  double from_s = 6;    // simulated time
+  double to_s = 7;
+}
+
+message ValidationRun {
+  uint32 index = 1;
+  string name = 2;      // the run log's directory name
+  string world = 3;
+  string contents = 4;
+  uint32 repeat = 5;
+  string status = 6;    // queued, running, done, error, cancelled, interrupted
+  string outcome = 7;   // reached, failed, collided
+  string detail = 8;
+  double started = 9;   // Unix time
+  double finished = 10;
+  double simulated_s = 11;
+  repeated RunFinding findings = 12;
+  string log_dir = 13;
+  // While the run is live and its Gazebo is up: GZ_PARTITION, GZ_IP and GZ_SIM_RESOURCE_PATH,
+  // what a Gazebo window needs to attach to it.
+  map<string, string> attach = 14;
+  bool has_replay = 15;       // Gazebo's recording of the run is in log_dir/replay
+  string resource_path = 16;  // GZ_SIM_RESOURCE_PATH for playing it back
+}
+
+message JobReport {
+  uint32 runs = 1;
+  map<string, uint32> outcomes = 2;
+  map<string, uint32> categories = 3;  // findings per category
+  map<string, uint32> rules = 4;       // findings per rule
+  repeated string argus_runs = 5;      // runs with an Argus finding
+  uint32 unfinished = 6;
+}
+
+message Job {
+  string id = 1;
+  string design = 2;
+  string version = 3;
+  string profile_id = 4;
+  string kind = 5;      // planar or aerial
+  double created = 6;
+  string status = 7;    // queued, running, done, cancelled
+  repeated ValidationRun runs = 8;
+  JobReport report = 9;
+  bool kept = 10;       // never deleted to make room for new jobs
+  uint64 size_bytes = 11;
+}
+
+message StartValidationReply {
+  bool ok = 1;
+  string detail = 2;
+  Job job = 3;
+}
+
+message JobsRequest {}
+
+message JobsReply {
+  repeated Job jobs = 1;  // oldest first
+}
+
+message JobRequest {
+  string id = 1;  // a prefix is enough
+}
+
+message JobReply {
+  bool found = 1;
+  string detail = 2;
+  Job job = 3;
+}
+
+message KeepJobRequest {
+  string id = 1;
+  bool keep = 2;  // false lets the job be deleted to make room again
+}
+
+// Named places and routes per site (argus.hub.places), and errands that run a robot along a
+// route (argus.hub.errand). A plain goal or a cancel ends a robot's errand.
+
+message PlaceInfo {
+  string name = 1;
+  double x = 2;
+  double y = 3;
+  double z = 4;
+  double tolerance_m = 5;  // 0 means the default
+  bool has_heading = 6;
+  double heading_rad = 7;
+}
+
+message AddPlaceRequest {
+  string site = 1;
+  PlaceInfo place = 2;
+  bool replace = 3;  // replace a place of the same name
+}
+
+message PlaceHereRequest {
+  string node_id = 1;   // the place is where this robot is now, in its site
+  string name = 2;
+  double tolerance_m = 3;
+  bool with_heading = 4;
+  bool replace = 5;
+}
+
+message SiteRequest {
+  string site = 1;  // empty means every site
+}
+
+message SitePlaces {
+  string site = 1;
+  repeated PlaceInfo places = 2;
+}
+
+message PlacesReply {
+  repeated SitePlaces sites = 1;
+}
+
+message RemoveRequest {
+  string site = 1;
+  string name = 2;
+}
+
+message RouteStop {
+  string place = 1;
+  double dwell_s = 2;
+}
+
+message RouteInfo {
+  string name = 1;
+  repeated RouteStop stops = 2;
+  string mode = 3;            // once, loop, back_and_forth
+  string on_unreachable = 4;  // skip, stop
+  uint32 cycles = 5;          // 0 means until cancelled (loop, back_and_forth)
+}
+
+message AddRouteRequest {
+  string site = 1;
+  RouteInfo route = 2;
+  bool replace = 3;
+}
+
+message SiteRoutes {
+  string site = 1;
+  repeated RouteInfo routes = 2;
+}
+
+message RoutesReply {
+  repeated SiteRoutes sites = 1;
+}
+
+message GoRequest {
+  string node_id = 1;
+  string place = 2;  // a place in the robot's site
+}
+
+message PatrolRequest {
+  string node_id = 1;
+  string route = 2;  // a route in the robot's site
+}
+
 service HubApp {
   rpc Status(StatusRequest) returns (HubStatus);
   rpc Robots(RobotsRequest) returns (RobotsReply);
@@ -146,4 +338,20 @@ service HubApp {
   rpc AddDesign(AddDesignRequest) returns (AddDesignReply);
   rpc Designs(DesignsRequest) returns (DesignsReply);
   rpc Design(DesignRequest) returns (DesignReply);
+  rpc Worlds(WorldsRequest) returns (WorldsReply);
+  rpc StartValidation(StartValidationRequest) returns (StartValidationReply);
+  rpc Jobs(JobsRequest) returns (JobsReply);
+  rpc Job(JobRequest) returns (JobReply);
+  rpc CancelJob(JobRequest) returns (Reply);
+  rpc KeepJob(KeepJobRequest) returns (Reply);
+  rpc DeleteJob(JobRequest) returns (Reply);
+  rpc AddPlace(AddPlaceRequest) returns (Reply);
+  rpc PlaceHere(PlaceHereRequest) returns (Reply);
+  rpc Places(SiteRequest) returns (PlacesReply);
+  rpc RemovePlace(RemoveRequest) returns (Reply);
+  rpc AddRoute(AddRouteRequest) returns (Reply);
+  rpc Routes(SiteRequest) returns (RoutesReply);
+  rpc RemoveRoute(RemoveRequest) returns (Reply);
+  rpc Go(GoRequest) returns (Reply);
+  rpc Patrol(PatrolRequest) returns (Reply);
 }

@@ -76,3 +76,6 @@ compute:
 
 assumptions:
   clear_at_start_m: 0.5
+  # No range sensor sees straight up, so the drone cannot see a ceiling: the highest it may
+  # fly above the floor it starts on is declared.
+  max_flight_height_m: 2.5

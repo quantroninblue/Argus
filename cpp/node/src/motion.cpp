@@ -71,8 +71,12 @@ double MotionModel::time_to_stop(const Twist& v) const {
 }
 
 std::vector<Pose4> MotionModel::stopping_path(const Pose4& start, const Twist& v, double coast_s,
-                                              double spacing_m, double radius_m) const {
+                                              double spacing_m, double radius_m,
+                                              std::vector<double>* times) const {
   std::vector<Pose4> poses = {start};
+  if (times) {
+    times->assign(1, 0.0);
+  }
   if (v.is_zero()) {
     return poses;
   }
@@ -82,16 +86,32 @@ std::vector<Pose4> MotionModel::stopping_path(const Pose4& start, const Twist& v
   // Step so neither the base nor the body's rim moves more than the spacing.
   const double rim = std::abs(v.yaw_rate) * std::max(radius_m, 0.1);
   const double dt = std::min(0.05, spacing_m / std::max(speed + rim, 1e-6));
+  // Each axis brakes at its own rate, as the controller (and accelerate()) does when sent a
+  // stop: a body that brakes hard forward but softly sideways stops its forward motion first.
+  auto axis_brake = [](double speed, double decel) {
+    return speed == 0.0 ? 0.0 : (decel > 0.0 ? std::abs(speed) / decel : 1e9);
+  };
+  const double bx = axis_brake(v.linear.x(), m_.x.decel_mps2);
+  const double by = axis_brake(v.linear.y(), m_.y.decel_mps2);
+  const double bz = axis_brake(v.linear.z(), m_.z.decel_mps2);
+  const double bw = axis_brake(v.yaw_rate, m_.yaw_accel_radps2);
+  auto scale = [&](double mid, double b) {
+    return mid < coast_s ? 1.0 : (b <= 0.0 ? 0.0 : std::max(0.0, 1.0 - (mid - coast_s) / b));
+  };
   Pose4 pose = start;
   for (double t = 0.0; t < total - 1e-12; t += dt) {
     const double step = std::min(dt, total - t);
     const double mid = t + 0.5 * step;
-    const double scale = mid < coast_s ? 1.0 : std::max(0.0, 1.0 - (mid - coast_s) / brake_s);
     Twist now = v;
-    now.linear *= scale;
-    now.yaw_rate *= scale;
+    now.linear.x() *= scale(mid, bx);
+    now.linear.y() *= scale(mid, by);
+    now.linear.z() *= scale(mid, bz);
+    now.yaw_rate *= scale(mid, bw);
     pose = integrate(pose, now, step);
     poses.push_back(pose);
+    if (times) {
+      times->push_back(t + step);
+    }
   }
   return poses;
 }

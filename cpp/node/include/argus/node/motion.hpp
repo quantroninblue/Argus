@@ -26,9 +26,11 @@ class MotionModel {
   double time_to_stop(const Twist& v) const;
 
   // Poses the body passes through if it holds `v` for `coast_s` and then brakes to rest, no
-  // more than `spacing_m` apart. Starts at `start`.
+  // more than `spacing_m` apart. Starts at `start`. With `times`, also when it reaches each
+  // pose, from the start.
   std::vector<Pose4> stopping_path(const Pose4& start, const Twist& v, double coast_s,
-                                   double spacing_m, double radius_m) const;
+                                   double spacing_m, double radius_m,
+                                   std::vector<double>* times = nullptr) const;
 
   const capabilities::MotionCapability& capability() const { return m_; }
 

@@ -154,3 +154,68 @@ TEST(Safety, UnreviewedProfileNeverMoves) {
   EXPECT_TRUE(v.flags & kNotSafetyReady);
   EXPECT_TRUE(v.velocity.is_zero());
 }
+
+namespace {
+
+TrackedObstacle person(double x, double y, double vx = 0.0, double vy = 0.0, bool has_moved = true) {
+  TrackedObstacle o;
+  o.id = 1;
+  o.position = Eigen::Vector2d(x, y);
+  o.velocity = Eigen::Vector2d(vx, vy);
+  o.radius_m = 0.25;
+  o.z_low_m = 0.0;
+  o.z_high_m = 1.75;
+  o.has_moved = has_moved;
+  o.moving = vx != 0.0 || vy != 0.0;
+  return o;
+}
+
+}  // namespace
+
+TEST(Safety, SlowsNearSomethingThatHasMovedButNotNearOtherObstacles) {
+  Fixture f(5.0);
+  SafetySupervisor s = f.supervisor();
+  // Standing 1 m to the side: well out of the way, but close.
+  std::vector<TrackedObstacle> movers{person(0.0, 1.0)};
+  SafetyInputs in = f.inputs();
+  in.movers = &movers;
+  uint32_t flags = 0;
+  const Twist out = s.preview(forward(1.0), in, flags);
+  EXPECT_TRUE(flags & kNearPeople);
+  EXPECT_LT(out.linear.x(), 0.6);
+  EXPECT_GE(out.linear.x(), SafetyConfig{}.people_speed_mps - 1e-9);
+  // The same thing never seen moving is an ordinary obstacle: no slowdown.
+  movers = {person(0.0, 1.0, 0.0, 0.0, false)};
+  flags = 0;
+  EXPECT_DOUBLE_EQ(s.preview(forward(1.0), in, flags).linear.x(), 1.0);
+  EXPECT_FALSE(flags & kNearPeople);
+}
+
+TEST(Safety, MovingAwayFromSomeoneAlreadyCloseIsAllowedTowardThemIsNot) {
+  Fixture f(5.0);
+  SafetySupervisor s = f.supervisor();
+  // Standing just behind the robot, inside the reach the supervisor keeps.
+  std::vector<TrackedObstacle> movers{person(-0.6, 0.0)};
+  SafetyInputs in = f.inputs();
+  in.movers = &movers;
+  uint32_t flags = 0;
+  EXPECT_GT(s.preview(forward(0.3), in, flags).linear.x(), 0.0);
+  EXPECT_FALSE(flags & kBlocked);
+  // Ahead instead: driving at them is refused.
+  movers = {person(0.6, 0.0)};
+  flags = 0;
+  EXPECT_DOUBLE_EQ(s.preview(forward(0.3), in, flags).linear.x(), 0.0);
+  EXPECT_TRUE(flags & kBlocked);
+}
+
+TEST(Safety, SomeoneWalkingAtTheRobotBlocksDrivingTowardThem) {
+  Fixture f(5.0);
+  SafetySupervisor s = f.supervisor();
+  // 1.6 m ahead at 1.4 m/s toward it: driving on meets them before the robot can stop.
+  std::vector<TrackedObstacle> movers{person(1.6, 0.0, -1.4, 0.0)};
+  SafetyInputs in = f.inputs();
+  in.movers = &movers;
+  uint32_t flags = 0;
+  EXPECT_LT(s.preview(forward(0.5), in, flags).linear.x(), 0.5);
+  EXPECT_TRUE(flags & (kBlocked | kSlowed));
+}

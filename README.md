@@ -20,7 +20,9 @@ final say on safety.
 ## Status
 
 Early development. Argus and Argo drive simulated robots end to end, including over a real
-network link; nothing has run on real hardware yet.
+network link, and Argus validates robot designs in Gazebo; nothing has run on real hardware
+yet. To try it, follow [the tutorial](docs/tutorial.md); every command is in
+[docs/cli.md](docs/cli.md).
 
 What exists today:
 
@@ -44,11 +46,15 @@ What exists today:
   that keeps a short list of waypoints up to date and remembers branches that turned out to be
   dead ends.
 - **Link handling on Argo**: heartbeats, link quality, a speed cap while the link is degraded,
-  and the profile's failsafe when it is lost (stop, hold, finish the current leg, return home
-  along its own trail, or land).
+  and the profile's failsafe when it is lost. Without the hub Argo only stops and parks
+  (stop; hold, or land where it is, for a drone); finding a way anywhere is the hub's job.
 - **Simulator** (`python/argus/sim/`): box worlds, ray-cast range sensors and a model of each
   control interface, plus a generator of random valid robot bodies. Collisions, limits and
   coverage are judged from simulator truth, not from Argo's own estimate.
+- **Design validation in Gazebo** (`python/argus/hub/validation.py`): a robot design (its
+  URDF, meshes, optionally its own Gazebo model) runs through a set of worlds with the real
+  Argo, each run is recorded for playback and diagnosed by rules that say whether the design,
+  Argus or the world is at fault.
 
 What it does today, tested on robots modelled on common platforms (`tests/bodies/`: TurtleBot3
 and TurtleBot4 class, Jackal and Husky class skid-steer bases, a 1:10 scale car, a mecanum base
@@ -59,12 +65,27 @@ of every drive type, which must stay safe:
 - Never commands speeds, accelerations or turns the body cannot do.
 - Never moves faster in a direction than its sensors can see far enough to stop for, and
   never moves where no sensor covers, unless the profile allows a creep speed there.
+- Tracks people and other things moving nearby, on the ground and in the air, and stays far
+  enough away to be at rest before anything walking toward it could reach it. It slows down
+  near people and keeps out of the way they are heading; a drone well above someone's head
+  is not held up by them. When someone stops in the way, the robot waits a few seconds, then
+  goes around if they stay.
+- Sees drops in the floor (a stair down, a dock edge) with sensors that look at the floor
+  ahead, and never drives over the edge. A body whose sensors never see the floor cannot.
+- A drone with no sensor that sees straight up must declare how high it may fly
+  (`assumptions.max_flight_height_m`); it never climbs above that.
 - Stops when sensor data goes stale or odometry fails, and refuses to move while the profile
   has unreviewed fields.
+- Refuses sensor data that keeps arriving but cannot be right (a driver resending the same
+  frame while the robot moves, a blinded sensor, timestamps that do not move forward), and
+  then moves only where its other sensors can see. Slows down when odometry disagrees with
+  what the range sensors show of the robot's own motion. A sensor that also gets no return
+  from dark or see-through surfaces can declare `no_return: unknown`, so such rays never
+  count as open space.
 - Reaches goals through the hub in worlds that need backtracking out of a dead end, a detour
   that first leads away from the goal, or a new route when a gap is blocked mid-run.
-- When the link drops for longer than the profile allows, runs that profile's failsafe, and
-  carries on with the mission once the link is back.
+- When the link drops for longer than the profile allows, stops and parks as the profile
+  says, and carries on with the mission once the link is back.
 
 ## Roadmap
 
@@ -72,10 +93,27 @@ of every drive type, which must stay safe:
    command adapters.
 2. Done: hub loop: sessions, site map, global planning and exploration with backtracking,
    tested under network loss.
-3. Setup tool for importing and calibrating a real robot, the on-robot runtime with ROS 2
-   drivers, and first hardware runs on the Axon.
-4. Perception and language models on the hub, each with a smaller fallback.
-5. A graphical interface for the hub, a fuller command line, and polish for a first release.
+3. Done: setup tool for importing and calibrating a robot, the on-robot runtime with its ROS 2
+   driver, and validation of robot designs in Gazebo.
+4. Next, for the first release: named places and routes, the hub correcting odometry drift
+   against its map, Argo stopping and reporting when its way is blocked so the hub can
+   re-route, and models on the hub (local or remotely hosted): explaining failed runs,
+   reviewing designs, labelling what robots see, and goals given in words.
+5. Then: first runs on real hardware (Vicharak Axon), a graphical interface for the hub, and
+   publishing on PyPI.
+
+## Known issues
+
+- A body moving fast can stop just outside its safety margin at the end of a wall and find no
+  motion it considers clear (seen with the Jackal class in Gazebo). Being fixed: Argo will stop
+  and report, and the hub will route it on.
+- A body with no rear sensors can wedge itself in a tight spot when an obstacle appears behind
+  it on a narrow way: it will not reverse into space it cannot see. It stays safe; the same fix
+  applies.
+- The car-like body in Gazebo fails now and then (1 run in 8): its odometry drifts and it loops
+  near the goal. The hub's drift correction is the fix.
+- The hub's site frame is the odometry frame of the robot until drift correction lands:
+  start a robot where the site's origin is.
 
 ## Building
 
@@ -90,6 +128,12 @@ tools/check.sh
 
 `tools/check.sh` builds everything into `build/` and runs the C++ and Python tests (a few
 minutes; some tests run over a real local network link in wall time).
+
+The `argus` command runs from the checkout through `tools/argus`. Put it on your PATH once:
+
+```sh
+mkdir -p ~/.local/bin && ln -s "$PWD/tools/argus" ~/.local/bin/argus
+```
 
 With ROS 2 Jazzy installed (desktop, with `ros-jazzy-ros-gz` for Gazebo Harmonic), the build
 also includes Argo's ROS 2 driver, and `tools/check.sh --gazebo` additionally drives robots
@@ -121,10 +165,9 @@ failsafe and odometry. Collision shapes, link frames and any sensors declared in
 come from the URDF; meshes become bounding boxes.
 
 ```sh
-export PYTHONPATH=python:build/python
-python3 -m argus setup template > answers.yaml   # then fill it in
-python3 -m argus setup import robot.urdf -a answers.yaml -o profile.yaml
-python3 -m argus setup report profile.yaml
+argus setup template > answers.yaml   # then fill it in
+argus setup import robot.urdf -a answers.yaml -o profile.yaml
+argus setup report profile.yaml
 ```
 
 Import lists anything missing instead of guessing it, and prints a capability report: stopping
@@ -133,7 +176,11 @@ rather than measured. `package://` mesh paths resolve through a sourced ROS 2 en
 `--package NAME=DIRECTORY`.
 
 On the robot, with ROS 2 sourced and the robot's drivers running, `setup check` confirms every
-declared topic exists with the right type and publishes at its declared rate. With `--motion`
+declared topic exists with the right type and publishes at its declared rate. It also checks
+that each range sensor is mounted where the profile says, so run it with the robot on a flat
+floor: a sensor that sees the floor must see it flat and at floor height, and two sensors that
+see the same walls must place them together. A camera pitched or rolled about 2 degrees from
+its declared mount, or turned about 4 degrees, fails the check. With `--motion`
 it also confirms the robot's own controller stops the robot when commands stop: the robot
 crawls forward at 0.1 m/s for a second (only with clear space ahead on the lidar, or with the
 drive wheels lifted and `--wheels-up`), then commands stop and the time to standstill is
@@ -146,7 +193,7 @@ command topic instead, without the supervisor.
 
 ```sh
 argo --config argo.yaml --setup        # on the robot
-python3 -m argus setup check profile.yaml --motion
+argus setup check profile.yaml --motion
 ```
 
 `setup calibrate` then measures command latency, acceleration, top speed and braking on
@@ -165,7 +212,7 @@ the profile to declare how much room around the robot's starting spot is clear (
 typical), and start it there; the setup report says if it is missing.
 
 ```sh
-python3 -m argus setup calibrate profile.yaml -o profile.calibrated.yaml
+argus setup calibrate profile.yaml -o profile.calibrated.yaml
 ```
 
 ## Driving a simulated robot
@@ -199,9 +246,9 @@ ep = run_episode(doc, w, (0.0, 0.0, 0.0, 0.0), goal, 30.0)
 print(ep.collided, ep.contacts)
 ```
 
-A contact counts against the robot only if it was still moving: someone walking into a robot
-that has already stopped is recorded in `ep.contacts` but is not a collision. The same movers
-run in Gazebo, where the robot's sensors see them.
+A contact counts against the robot only if it was driving or turning into the mover: someone
+walking into a robot that has already stopped is recorded in `ep.contacts` but is not a
+collision. The same movers run in Gazebo, where the robot's sensors see them.
 
 ## Sending a simulated robot through the hub
 
@@ -262,22 +309,22 @@ runs/            run logs
 run/app.sock     where the argus command reaches the hub (only you can open it)
 ```
 
-Set it up once, giving every name or address robots will use to reach the hub, then start it:
+Set it up once, giving every name or address robots will use to reach the hub, then start it
+(from a terminal with ROS 2 sourced if you will validate designs in Gazebo):
 
 ```sh
-export PYTHONPATH=python:build/python
-python3 -m argus hub init --host hub.example.lan --host 192.168.1.20
-python3 -m argus hub start --intake 20Mbit
+argus hub init --host hub.example.lan --host 192.168.1.20
+argus hub start --intake 20Mbit
 ```
 
 The hub runs until Ctrl-C. From another terminal on the same machine (or over SSH):
 
 ```sh
-python3 -m argus status                    # the hub, and how many robots are connected
-python3 -m argus robots                    # each robot's pose, link and mission
-python3 -m argus goal robot-1 3 1.5        # send a robot to a point in its site frame
-python3 -m argus cancel robot-1
-python3 -m argus watch                     # robots connecting, link and mission changes
+argus status                    # the hub, and how many robots are connected
+argus robots                    # each robot's pose, link and mission
+argus goal robot-1 3 1.5        # send a robot to a point in its site frame
+argus cancel robot-1
+argus watch                     # robots connecting, link and mission changes
 ```
 
 `--intake` is the bandwidth set aside for map evidence from all robots together. The hub
@@ -285,17 +332,38 @@ shares it fairly between robots and lowers it while applying evidence takes too 
 time; evidence over a robot's share is dropped, while heartbeats, telemetry and events are
 always processed, so a busy hub degrades its map rather than its links.
 
+## Places and routes
+
+Each site keeps named places and routes in the hub's home (`sites/<site>/`). Teach a place by
+driving a robot there, or give its coordinates; a route is a list of places with an optional
+dwell at each:
+
+```sh
+argus place here robot-1 dock                 # where robot-1 is now, in its site
+argus place add warehouse shelf-3 6.5 2.0
+argus route add warehouse rounds shelf-3:30 dock --mode loop --cycles 4
+argus go robot-1 shelf-3
+argus patrol robot-1 rounds
+argus place list
+argus route list warehouse
+```
+
+A route runs `once`, in a `loop` or `back_and_forth`, and `--on-unreachable skip` (the default)
+moves on to the next stop when one cannot be reached, while `stop` ends the errand there. A
+plain `argus goal` or `argus cancel` ends a robot's errand. `argus watch` shows each leg as it
+starts, arrives, dwells or is skipped.
+
 ## Adding a robot design
 
 A design is your robot as you have it: its URDF or xacro, the meshes it uses, optionally
 your own Gazebo model of it (an SDF or xacro with its plugins), and an answers file for what
 a URDF cannot say (speed and braking limits, the command topic, the failsafe; start one with
-`python3 -m argus setup template`). With the hub running:
+`argus setup template`). With the hub running:
 
 ```sh
-python3 -m argus design add robot.urdf.xacro -a answers.yaml --gazebo-model robot.sdf.xacro
-python3 -m argus design list
-python3 -m argus design show my-robot
+argus design add robot.urdf.xacro -a answers.yaml --gazebo-model robot.sdf.xacro
+argus design list
+argus design show my-robot
 ```
 
 `design add` expands xacro, copies every mesh the files reference into the design, and sends
@@ -313,6 +381,49 @@ anything may run it. The checks report problems rather than fixing them:
 design. `package://` mesh paths resolve through a sourced ROS 2 environment or
 `--package NAME=DIRECTORY`.
 
+## Validating a design in Gazebo
+
+With ROS 2 Jazzy and Gazebo Harmonic installed and sourced where the hub runs, the hub drives a
+stored design through a set of Gazebo worlds, one run at a time, and diagnoses every run:
+
+```sh
+argus worlds                                   # what a job can use
+argus validate my-robot --worlds wall_with_gap,clutter --contents objects,movers --view
+argus jobs report JOB
+```
+
+Each run puts your robot, as your files describe it, into one world with a start and a goal,
+sends it there through the real Argo binary and a hub of its own, and keeps the run's log.
+Nothing from a validation run reaches the maps of your real sites. A world holds what you ask
+for: `objects` (the world as shipped), `movers` (the same with people walking across the
+robot's way) or `empty` (the bare room).
+
+Gazebo runs without a window. To watch, add `--view` (or run `argus jobs view JOB` at any
+time, before the first run or in the middle of one): a Gazebo window opens on each run as it
+starts and closes when it ends. Closing the window yourself never stops a run. Ctrl-C stops
+following; the job carries on, and `argus jobs watch JOB` picks it up again.
+
+Every finding in a report says who is at fault:
+
+- **design**: your robot. Motors that cannot reach the commanded speed, odometry that
+  disagrees with where the robot really went, a sensor slower or later than declared, or a
+  sensor your Gazebo model puts somewhere other than your URDF says.
+- **argus**: Argus itself. Argo late on its control period, Argo driving into something,
+  Argo stalling with a way open, messages lost between Gazebo and Argo. Each one is a bug in
+  Argus; please report it with the run's log.
+- **world**: the goal cannot be reached by this body in this world.
+- **inconclusive**: the run failed and no rule explains it, or it may follow from a design
+  finding; read the log.
+
+```sh
+argus runs show JOB 3       # one run: findings, a timeline of what Argo reported, the log files
+argus runs replay JOB 3     # play the run back in Gazebo, with play, pause and seek
+```
+
+Every run is recorded, so any finished run, failed or not, can be watched again. The hub
+keeps the newest 10 jobs; `argus jobs keep JOB` keeps one for good, and `argus jobs delete
+JOB` frees its space. Jobs live in `jobs/` in the hub's home.
+
 ## Certificates
 
 The hub and every robot authenticate each other with certificates from the hub's own
@@ -320,7 +431,7 @@ authority. A robot's certificate name must match its Argo `node_id`. `hub init` 
 authority and the hub's certificate; issue each robot's from the same directory:
 
 ```sh
-python3 -m argus certs robot ~/.local/share/argus/pki robot-1
+argus certs robot ~/.local/share/argus/pki robot-1
 ```
 
 Keep `ca.key` off the robots; each robot needs only `ca.pem` and its own certificate and key.

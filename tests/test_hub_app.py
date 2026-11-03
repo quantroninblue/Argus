@@ -286,3 +286,59 @@ def test_designs_are_added_listed_and_shown_through_the_command(running_hub, tmp
     capsys.readouterr()
     assert main(["design", "show", "nothing"] + home) == 1
     assert "no design 'nothing'" in capsys.readouterr().err
+
+
+@pytest.fixture
+def fake_runs(monkeypatch):
+    """Validation runs by the stand-in child (tests/validation_child.py), so no Gazebo."""
+    import functools
+
+    from argus.hub import app
+    from argus.hub.validation import Validator
+
+    monkeypatch.setenv("FAKE_RUN", "reach")
+    monkeypatch.setenv("PYTHONPATH", f"{Path(__file__).parent}{os.pathsep}{os.environ.get('PYTHONPATH', '')}")
+    monkeypatch.setattr(app, "Validator", functools.partial(Validator, child_module="validation_child",
+                                                            preflight=lambda: []))
+
+
+def test_a_design_is_validated_reported_and_its_runs_shown_through_the_command(fake_runs, running_hub, tmp_path,
+                                                                                capsys):
+    from test_designs import _design_dir
+
+    d, packages = _design_dir(tmp_path)
+    home = ["--home", str(running_hub.root)]
+    assert main(["design", "add", str(d / "robot.urdf"), "-a", str(d / "answers.yaml"),
+                 f"--package=my_robot={packages['my_robot']}"] + home) == 0
+    capsys.readouterr()
+
+    assert main(["worlds"] + home) == 0
+    assert "wall_with_gap" in capsys.readouterr().out
+
+    assert main(["validate", "test-rover", "--worlds", "open_room,clutter", "--contents", "objects,movers"] + home) == 0
+    out = capsys.readouterr().out
+    assert "4 runs" in out
+    assert "run 1 of 4: open_room, objects, repeat 1: reached" in out
+    assert "4 of 4 reached" in out and "no Argus findings" in out
+    job_id = out.split("job ", 1)[1].split(":", 1)[0]
+
+    assert main(["validate", "test-rover", "--worlds", "moon"] + home) == 1
+    assert "no world 'moon'" in capsys.readouterr().err
+
+    assert main(["jobs", "list"] + home) == 0
+    assert job_id in capsys.readouterr().out
+    assert main(["jobs", "report", job_id[:15]] + home) == 0
+    report = capsys.readouterr().out
+    assert "4 of 4 runs finished: 4 reached" in report and "clutter, movers" in report
+
+    assert main(["runs", "show", job_id[:15], "2"] + home) == 0
+    shown = capsys.readouterr().out
+    assert "open_room, movers" in shown and "run.json" in shown
+    assert main(["runs", "show", job_id[:15], "9"] + home) == 1
+    assert "runs are numbered 1 to 4" in capsys.readouterr().err
+
+    assert main(["jobs", "keep", job_id[:15]] + home) == 0
+    assert "kept" in capsys.readouterr().out
+    assert main(["jobs", "delete", job_id[:15]] + home) == 0
+    assert main(["jobs", "list"] + home) == 0
+    assert "no validation jobs yet" in capsys.readouterr().out

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <vector>
 
 #include "argus/grid/evidence.hpp"
@@ -22,6 +23,9 @@ struct LocalMapConfig {
   // Keep the log-odds changes since the last take_evidence() call, for the hub's site map.
   // Only changes actually made are kept, plus cells observed for the first time.
   bool record_evidence = false;
+  // Frames a cell must be seen free, with every neighbour free, before it counts as ever-free
+  // (Dynablox's burn-in, Schmid et al. 2023): a return landing there is something moving.
+  int ever_free_burn_in = 5;
 };
 
 // Short-horizon voxel map in the odom frame that moves with the robot. A ring buffer: cells
@@ -42,7 +46,32 @@ class LocalMap {
   // here; it is not evidence and never reaches the hub.
   bool viewed(const Index3& index) const;
   void mark_viewed(const Index3& index);
+  // A floor edge: no floor where a ray crossed floor level. The cell reads as occupied until
+  // a return from the floor in its column shows the floor is there; rays passing over it do
+  // not clear it, since a drop is missing floor, not something standing in the space.
+  bool drop(const Index3& index) const;
+  void mark_drop(const Index3& index);
+  void clear_drop_column(const Index3& index);
+  // Back to unknown and never looked at, here only (no evidence): something that moved out
+  // of sight may be standing there.
+  void forget(const Index3& index);
+  // Ever-free (Dynablox): seen free in `ever_free_burn_in` frames since it was last occupied,
+  // with none of its 18 neighbours occupied and none in its own layer unobserved, so the face
+  // of a wall or the edge of unseen space does not qualify. A return landing on it is
+  // something moving. Only revoke_ever_free (something standing there for good) or an
+  // occupied return in the cell itself takes it away.
+  bool ever_free(const Index3& index) const;
+  // Tells the ever-free test which cells no sensor can see from where the robot is, being
+  // above or below every sensor's vertical view (BodyVolume::out_of_vertical_view). Such a
+  // neighbour, never observed, does not hold a cell back from ever-free: one scan plane never
+  // observes the layers next to it. Unset, every unobserved neighbour holds it back.
+  void set_vertically_unseen(std::function<bool(const Index3&)> f) { vertically_unseen_ = std::move(f); }
+  // Takes ever-free away from a cell and its neighbours: something has stood there too long
+  // to be passing through, and is now part of the map.
+  void revoke_ever_free(const Index3& index);
   Cell at(const Vec3& point) const { return cell(index_of(point)); }
+  // The cell's log-odds (0 when unknown or outside the window); below zero is free.
+  int log_odds(const Index3& index) const;
   bool contains(const Index3& index) const;
 
   Index3 index_of(const Vec3& point) const;
@@ -71,6 +100,15 @@ class LocalMap {
   std::vector<int8_t> log_odds_;
   std::vector<uint8_t> observed_;
   std::vector<uint8_t> viewed_;
+  // Ever-free bookkeeping: frames seen free (saturating), the last frame that counted, and the
+  // flag. A frame is one integrate() call.
+  std::vector<uint8_t> free_frames_;
+  std::vector<uint16_t> last_free_frame_;
+  std::vector<uint8_t> ever_free_;
+  std::vector<uint8_t> drop_;
+  uint16_t frame_ = 0;
+  std::function<bool(const Index3&)> vertically_unseen_;
+  void try_ever_free(const Index3& index, size_t slot);
   grid::FrameTracer tracer_;
   std::vector<int16_t> pending_;
   // Per slot: 0 not touched since the last flush, else whether it was observed before.

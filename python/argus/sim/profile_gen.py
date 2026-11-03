@@ -137,7 +137,9 @@ def _planar(rng: random.Random, b: _Builder) -> tuple[dict, dict, dict]:
         },
     }
     geometry = {"ground_z_m": 0.0, "shapes": shapes}
-    failsafe_action = rng.choice(["stop", "hold", "finish_leg_then_stop", "return_home"])
+    # Four outcomes drawn, as the generator always has, so each seed keeps giving the same
+    # bodies (tests and fix notes name them by id); the actions are stop and hold only.
+    failsafe_action = ["stop", "hold", "stop", "hold"][rng.choice(range(4))]
     control = {"interface": "velocity", "transport": "ros2", "endpoint": "/cmd_vel"}
     return geometry, motion, {"failsafe_action": failsafe_action, "control": control,
                               "top_speed": top_speed}
@@ -189,7 +191,8 @@ def _aerial(rng: random.Random, b: _Builder) -> tuple[dict, dict, dict]:
             "yaw": {"rate_radps": _r(rng.uniform(0.5, 3.0)), "accel_radps2": _r(rng.uniform(1.0, 6.0))},
         },
     }
-    failsafe_action = rng.choice(["hold", "land", "return_home"])
+    # Three outcomes drawn, for the same reason as above.
+    failsafe_action = ["hold", "land", "land"][rng.choice(range(3))]
     control = rng.choice([
         {"interface": "pose_setpoint", "transport": "mavlink", "endpoint": "udp://:14540"},
         {"interface": "velocity", "transport": "mavlink", "endpoint": "udp://:14540"},
@@ -243,6 +246,8 @@ def generate_profile(rng: random.Random, index: int) -> dict[str, Any]:
     # Scenarios start every body in a clear spot. Fixed, so it draws nothing from rng and every
     # other field stays as it was for a given seed.
     doc["assumptions"] = {"clear_at_start_m": 0.5}
+    if space == "aerial":
+        doc["assumptions"]["max_flight_height_m"] = 2.5
     return doc
 
 
