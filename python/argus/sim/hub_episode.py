@@ -45,11 +45,11 @@ class HubLoop:
     def __init__(self, doc: dict, world: World, start, goal, tolerance_m: float = 0.4,
                  faults: LinkFaults | None = None, options: SimOptions | None = None,
                  hub_config: HubConfig | None = None, node_config=None, session_config=None,
-                 hub_period_s: float = 0.05) -> None:
+                 hub_period_s: float = 0.05, sites_dir=None) -> None:
         self.registry = Registry()
         profile = self.registry.add_profile(doc)
         self.registry.add_robot(NODE_ID, profile.id, SITE_ID)
-        self.hub = Hub(self.registry, config=hub_config)
+        self.hub = Hub(self.registry, config=hub_config, sites_dir=sites_dir)
         self.goal = tuple(float(v) for v in goal)
         self.tolerance_m = tolerance_m
         self.hub.set_goal(NODE_ID, self.goal, tolerance_m, 0.0)
