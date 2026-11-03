@@ -4,7 +4,9 @@ This walks through validating a robot design with Argus, using the TurtleBot3 Wa
 ships with ROS 2 Jazzy, then your own robot. You will build Argus, start the hub, add the
 robot as a design, drive it through Gazebo worlds, and read what the runs found.
 
-Every command after the build is `argus ...`. Allow about an hour, most of it waiting for the
+Every command after the build is `argus ...`, run from the folder you cloned Argus into. You can
+type them into the Argus console instead, which `argus` opens on its own, with `/` in place of
+`argus` (`/validate waffle --view`). Allow about an hour, most of it waiting for the
 build and the runs.
 
 ## What you need
@@ -17,20 +19,18 @@ build and the runs.
 
 ```sh
 sudo apt install cmake g++ libeigen3-dev libyaml-cpp-dev libprotobuf-dev protobuf-compiler \
-    libgrpc++-dev protobuf-compiler-grpc libgtest-dev pybind11-dev python3-dev python3-yaml \
-    python3-jsonschema python3-protobuf python3-grpcio python3-numpy python3-pytest python3-jwt \
+    libgrpc++-dev protobuf-compiler-grpc pybind11-dev python3-dev python3-venv python3-yaml \
+    python3-jsonschema python3-protobuf python3-grpcio python3-numpy python3-jwt \
     python3-cryptography openssl
 sudo apt install ros-jazzy-ros-gz ros-jazzy-xacro ros-jazzy-nav2-minimal-tb3-sim
 
 git clone https://github.com/quantroninblue/Argus.git argus
 cd argus
-source /opt/ros/jazzy/setup.bash
-tools/check.sh
+tools/build.sh
 ```
 
-`tools/check.sh` builds the hub's modules and Argo, with its ROS 2 driver, into `build/`, then
-runs the tests. It takes several minutes. When it finishes, put the `argus` command on your
-PATH:
+`tools/build.sh` builds the hub's modules and Argo, with its ROS 2 driver, into `build/`. It takes
+several minutes. When it finishes, put the `argus` command on your PATH:
 
 ```sh
 mkdir -p ~/.local/bin && ln -s "$PWD/tools/argus" ~/.local/bin/argus
@@ -71,8 +71,7 @@ for the Waffle are in `tests/designs/`.
 Start with the URDF alone:
 
 ```sh
-TB3=/opt/ros/jazzy/share/nav2_minimal_tb3_sim
-argus design add $TB3/urdf/turtlebot3_waffle.urdf -a tests/designs/turtlebot3_waffle_answers.yaml --name waffle
+argus design add /opt/ros/jazzy/share/nav2_minimal_tb3_sim/urdf/turtlebot3_waffle.urdf -a tests/designs/turtlebot3_waffle_answers.yaml --name waffle
 ```
 
 Argus copies the URDF and every mesh it names into the hub, checks it, and stores it as a
@@ -131,8 +130,8 @@ The TurtleBot3 package also ships its own Gazebo model of the Waffle, with its o
 sensors. Add the design again with it:
 
 ```sh
-argus design add $TB3/urdf/turtlebot3_waffle.urdf -a tests/designs/turtlebot3_waffle_answers.yaml \
-    --gazebo-model $TB3/urdf/gz_waffle.sdf.xacro --name waffle-gz
+argus design add /opt/ros/jazzy/share/nav2_minimal_tb3_sim/urdf/turtlebot3_waffle.urdf -a tests/designs/turtlebot3_waffle_answers.yaml \
+    --gazebo-model /opt/ros/jazzy/share/nav2_minimal_tb3_sim/urdf/gz_waffle.sdf.xacro --name waffle-gz
 argus design show waffle-gz
 ```
 

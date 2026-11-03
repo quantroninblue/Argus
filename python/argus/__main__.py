@@ -764,10 +764,20 @@ def main(argv: list[str] | None = None) -> int:
     a.add_argument("robot")
     a.add_argument("text", help="the instruction")
     a.add_argument("--yes", action="store_true", help="send it without asking")
+    a = sub.add_parser("console", parents=[home], help="the Argus console; plain `argus` on a terminal opens it")
+    a.add_argument("--plain", action="store_true", help="a plain prompt instead of the full-screen app")
     if not argv:
+        from argus import console
+
+        if console.can_open():
+            return console.start()
         p.print_help()
         return 0
     args = p.parse_args(argv)
+    if args.command == "console":
+        from argus import console
+
+        return console.start(args.home, args.plain)
     if args.command == "hub":
         from argus.hub import run
 

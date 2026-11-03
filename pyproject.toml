@@ -6,6 +6,9 @@ requires-python = ">=3.10"
 license = {text = "MIT"}
 dependencies = ["pyyaml>=6", "jsonschema>=4.10", "protobuf>=4.21", "pyjwt[crypto]>=2.7"]
 
+[project.optional-dependencies]
+console = ["textual>=6.6,<7"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 # Noise from the system protobuf package on Python 3.12, not from our code.

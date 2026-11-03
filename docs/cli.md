@@ -1,5 +1,11 @@
 # The argus command
 
+`argus` on its own opens the console: a timeline of what the hub reports, a line to type in, and a
+status line. Type `/help` there. `argus console --plain` opens a plain prompt instead, and the
+console falls back to one when the full-screen app is not installed. Inside the console, `/` stands
+for `argus`, `/hub start` starts the hub in the background, and anything without a `/` is an
+instruction for a robot, always shown for you to confirm before it is sent.
+
 Every command runs on the hub's machine (over SSH from elsewhere). Commands that talk to the
 hub take `--home DIR` when the hub's home is not `~/.local/share/argus` (or `ARGUS_HOME`).
 `--no-color` anywhere turns colour off, as do `NO_COLOR` and piped output. `argus COMMAND

@@ -7,4 +7,7 @@ if [ ! -d "$root/build/python/argus" ]; then
   echo "argus is not built yet: run tools/check.sh in $root first" >&2
   exit 1
 fi
-PYTHONPATH="$root/python:$root/build/python${PYTHONPATH:+:$PYTHONPATH}" exec python3 -m argus "$@"
+# A .venv here holds what the full-screen console needs; without one, the plain console opens.
+python=python3
+[ -x "$root/.venv/bin/python" ] && python="$root/.venv/bin/python"
+PYTHONPATH="$root/python:$root/build/python${PYTHONPATH:+:$PYTHONPATH}" exec "$python" -m argus "$@"
