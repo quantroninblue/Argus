@@ -115,6 +115,7 @@ again. A local server keeps everything on your machine.
 ## Known limits
 
 - Nothing has run on a real robot yet.
+- A site's map is not saved yet, so restarting the hub loses it. Named places are kept.
 - Start robots at the site's origin: the hub cannot yet find a robot that starts somewhere else.
 - Heavy odometry drift can beat the hub's correction. If a robot's first pass through a site goes
   badly wrong, its map stays wrong. Drift correction and place recognition have only been run in
@@ -127,10 +128,46 @@ again. A local server keeps everything on your machine.
   space it cannot see. It stays safe.
 - A car-like robot in Gazebo fails about 1 run in 8, looping near the goal.
 
-## Coming next
+## Planned features
 
-First runs on real hardware (Vicharak Axon), labelling what robots see, a graphical interface, and
-installing from PyPI.
+These are not built yet. They are where Argus is going, roughly in this order.
+
+**Ready for real sites**
+
+- **Maps that last.** A site's map survives a hub restart, so robots pick up where they left off.
+- **Start anywhere.** A robot works out where it is on a known map from what it sees, wherever it
+  is switched on or restarted.
+- **Running on real robots.** Support for Vicharak Axon boards first, then Raspberry Pi and Jetson,
+  with checks that measure each robot's timing and sensor coverage on the real hardware.
+- **Links that work anywhere.** Less data per robot, so robots can run over cellular as well as
+  Wi-Fi.
+
+**Robots that understand what they see**
+
+- **Knowing what things are.** Robots tell people from pallets, doors and open floor using the
+  camera and the compute they already carry, even with the hub out of reach.
+- **Go to things, not just places.** Send a robot to "the blue cart" or "the nearest open door"
+  without teaching that spot first.
+- **Finding the way by sight.** Robots use the camera view to choose where to go in places they
+  have never seen, with every move still checked by Argo's safety layer.
+- **Whole jobs in plain words.** Give a robot a task and it works out the steps, checks them
+  with you, and reports back in plain words.
+- **Your choice of compute.** Run the hub on your own GPUs or on rented cloud GPUs. Everything
+  that needs a GPU stays optional, and robots keep working safely without it.
+
+**More capable fleets**
+
+- **Robots that work together.** Robots on a site share the work and keep out of each other's way.
+- **Docking and charging.** Robots know their battery level and take themselves to a charger.
+- **Smoother driving.** Better motion through tight spaces and around moving people.
+
+**Easier to use**
+
+- **A graphical interface.** See your sites, robots and runs in one place.
+- **A sandbox.** Put your robot in a simulated world and try things out by hand.
+- **Generated worlds.** Describe a site, such as "2 m aisles with pallets on both sides", and test
+  your robot in it. Factory layouts first, then outdoor sites.
+- **Simple install.** Install Argus from PyPI instead of building it from source.
 
 ## Feedback
 
